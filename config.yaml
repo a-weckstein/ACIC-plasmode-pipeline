@@ -1,0 +1,129 @@
+# =============================================================================
+# config.yaml — ACIC 2016 plasmode nuisance-learner simulation study
+# (manuscript simulation (2))
+#
+# One config for the whole pipeline. Scripts 01-04 read it from this directory.
+# Settings are addressed by their ACIC id (the identifier aciccomp2016 uses);
+# the manuscript's DGP ids 1-44 (Table S2) are carried alongside.
+# =============================================================================
+
+# --- Data-generating process (Dorie et al. 2019; aciccomp2016::dgp_2016) ------
+dgp:
+  n_population: 4802        # fixed real covariate matrix aciccomp2016::input_2016 (4,802 x 58)
+  n_sample: 1000            # analysis subsample per replicate, drawn without replacement
+  n_sims: 50                # Monte Carlo replicates per DGP setting
+  # Seed protocol -- every random draw is deterministic in (acic_id, sim_id), so
+  # every learner sees the IDENTICAL dataset and folds (paired comparisons):
+  #   surfaces, A, Y : dgp_2016(x, acic_id, sim_id) for numbered ACIC settings
+  #                    (the package's curated seed table); custom settings pass
+  #                    their knob list with sim_id as the seed
+  #   n=1000 subsample : set.seed(subsample_seed) right after dgp_2016();
+  #                    "legacy"     = sim_id*100 + acic_id
+  #                    "namespaced" = 500000 + sim_id*1000 + acic_id
+  #   cross-fit folds : set.seed(sim_id*1000 + acic_id)
+  # NOTE dgp_2016() switches R's sampler to sample.kind = "Rounding" for the
+  # session; scripts 01 and 02 rely on that (see their headers).
+  subsample_seed_legacy_multiplier: 100
+  subsample_seed_namespaced_offset: 500000
+  subsample_seed_namespaced_multiplier: 1000
+  fold_seed_multiplier: 1000
+
+# --- The 44 DGP settings (manuscript Table S2) ---------------------------------
+# columns: manuscript DGP id; ACIC id; the six dgp_2016 knobs; subsample-seed
+# scheme. Numbered ACIC ids (<= 77) are rows of aciccomp2016::parameters_2016
+# (knobs listed here are cross-checked against the package at load time).
+# ACIC ids >= 100 are CUSTOM settings built with the same machinery:
+#   1xx = full-overlap twins of the one-term setting (id - 100), "legacy" seed
+#         (so (1xx, sim k) draws the same subsample rows as (id-100, sim k+1));
+#   2xx = knob combinations with no numbered analog, "namespaced" seed.
+settings:
+  columns: [dgp_id, acic_id, model.trt, root.trt, overlap.trt, model.rsp, alignment, te.hetero, seed_scheme]
+  rows:
+    - [ 1, 101, linear,     0.35, full,     linear,      0.75, high, legacy]
+    - [ 2, 105, linear,     0.35, full,     exponential, 0.75, high, legacy]
+    - [ 3, 106, polynomial, 0.35, full,     linear,      0.75, high, legacy]
+    - [ 4, 113, linear,     0.65, full,     exponential, 0.75, high, legacy]
+    - [ 5, 204, linear,     0.35, full,     step,        0.75, high, namespaced]
+    - [ 6, 205, step,       0.35, full,     linear,      0.75, high, namespaced]
+    - [ 7, 206, linear,     0.35, full,     step,        0.25, med,  namespaced]
+    - [ 8, 207, step,       0.35, full,     linear,      0.25, med,  namespaced]
+    - [ 9,   4, polynomial, 0.35, full,     exponential, 0.75, high, legacy]
+    - [10,  28, polynomial, 0.35, full,     step,        0.25, high, legacy]
+    - [11,  29, polynomial, 0.35, full,     step,        0.75, med,  legacy]
+    - [12,  30, polynomial, 0.35, full,     step,        0.75, high, legacy]
+    - [13,  32, polynomial, 0.35, full,     exponential, 0.25, high, legacy]
+    - [14,  33, polynomial, 0.35, full,     exponential, 0.75, med,  legacy]
+    - [15,  41, polynomial, 0.65, full,     step,        0.25, high, legacy]
+    - [16,  42, polynomial, 0.65, full,     step,        0.75, med,  legacy]
+    - [17,  43, polynomial, 0.65, full,     step,        0.75, high, legacy]
+    - [18,  45, polynomial, 0.65, full,     exponential, 0.25, high, legacy]
+    - [19,  46, polynomial, 0.65, full,     exponential, 0.75, med,  legacy]
+    - [20,  47, polynomial, 0.65, full,     exponential, 0.75, high, legacy]
+    - [21,  56, step,       0.35, full,     step,        0.25, high, legacy]
+    - [22,  57, step,       0.35, full,     step,        0.75, med,  legacy]
+    - [23,  58, step,       0.35, full,     step,        0.75, high, legacy]
+    - [24,  60, step,       0.35, full,     exponential, 0.25, high, legacy]
+    - [25,  61, step,       0.35, full,     exponential, 0.75, med,  legacy]
+    - [26,  62, step,       0.35, full,     exponential, 0.75, high, legacy]
+    - [27,  71, step,       0.65, full,     step,        0.25, high, legacy]
+    - [28,  72, step,       0.65, full,     step,        0.75, med,  legacy]
+    - [29,  73, step,       0.65, full,     step,        0.75, high, legacy]
+    - [30,  75, step,       0.65, full,     exponential, 0.25, high, legacy]
+    - [31,  76, step,       0.65, full,     exponential, 0.75, med,  legacy]
+    - [32,  77, step,       0.65, full,     exponential, 0.75, high, legacy]
+    - [33, 103, linear,     0.35, full,     linear,      0.75, none, legacy]
+    - [34, 102, polynomial, 0.35, full,     exponential, 0.75, none, legacy]
+    - [35, 203, step,       0.35, full,     exponential, 0.75, none, namespaced]
+    - [36,   2, polynomial, 0.35, one-term, exponential, 0.75, none, legacy]
+    - [37,   3, linear,     0.35, one-term, linear,      0.75, none, legacy]
+    - [38,   5, linear,     0.35, one-term, exponential, 0.75, high, legacy]
+    - [39,   6, polynomial, 0.35, one-term, linear,      0.75, high, legacy]
+    - [40,   7, polynomial, 0.35, one-term, exponential, 0.75, high, legacy]
+    - [41,   8, polynomial, 0.35, one-term, exponential, 0.00, high, legacy]
+    - [42,   9, step,       0.35, one-term, step,        0.75, high, legacy]
+    - [43,  24, polynomial, 0.35, one-term, step,        0.75, high, legacy]
+    - [44,  54, step,       0.35, one-term, exponential, 0.75, high, legacy]
+
+# --- Estimation settings ------------------------------------------------------
+estimation:
+  pi_bounds: [0.025, 0.975]        # propensity truncation, applied to every learner before any estimator
+  k_folds: 5                       # cross-fitting folds (shared across learners within a sim)
+  cross_fit_options: [false, true]
+  estimands: [ATE, ATT]
+  estimators: [tmle, aipw, ipw, gcomp]   # each run for the ATE and the ATT
+
+# --- Nuisance learners (manuscript roster; store keys) --------------------------
+#   parametric           "Parametric"  (ATE/ATT displays; pooled Y ~ A + X outcome model)
+#   parametric_strat     "Parametric"  (CATE/PEHE displays; arm-stratified T-learner)
+#   ranger_naimi         "Random Forest"
+#   sl_naimi_v1_adapt    "SL Naimi"
+#   sl_balzer_screened   "SL Balzer"
+#   sl_default_screened  "SL Default"
+#   hal_s1_d2_acic       "HAL"
+#   oracle               true nuisances (no cross-fit arm)
+# TabPFN v3 (cloud API) is documented in the README and is not part of this code.
+learners:
+  - parametric
+  - parametric_strat
+  - ranger_naimi
+  - sl_naimi_v1_adapt
+  - sl_balzer_screened
+  - sl_default_screened
+  - hal_s1_d2_acic
+  - oracle
+
+# --- Evaluation (script 04) ---------------------------------------------------
+evaluation:
+  # ATE and CATE are evaluated on full-overlap settings only (identifiability);
+  # the ATT is identified in every setting (non-positivity affects the untreated
+  # only). PEHE is reported for cross-fit nuisances only.
+  ate_settings: full_overlap
+  att_settings: all
+  pehe_settings: full_overlap
+  pehe_cross_fit_only: true
+
+# --- Paths (relative to this directory) --------------------------------------
+paths:
+  data_inputs: _data_inputs        # per-(setting, sim) dataset cache
+  data_processed: _data_processed  # nuisance fits: <setting>/<learner>/...; optional CSV export
+  results: results
