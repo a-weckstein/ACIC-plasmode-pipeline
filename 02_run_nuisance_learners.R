@@ -11,7 +11,7 @@
 # sole moving part.
 #
 # Writes, per cell:
-#   _data_processed/setting_<acic_id>/nuisance/<learner>/sim_XXXX_<cf|nocf>.rds
+#   _data_processed/setting_<id>/nuisance/<learner>/sim_XXXX_<cf|nocf>.rds
 #   = list(pihat, mu0hat, mu1hat, fold_id, nuisance_time, nuisance_time_wall, ...)
 # Resume-safe: cells whose file already exists are skipped.
 #
@@ -66,18 +66,20 @@
 # --- Settings ----------------------------------------------------------------
 # Command line:
 #   Rscript 02_run_nuisance_learners.R --settings 4,24 --sims 1:5
+#   Rscript 02_run_nuisance_learners.R --settings manuscript          # all 44 manuscript DGPs
 #   Rscript 02_run_nuisance_learners.R --settings 24 --learners parametric,ranger_naimi --cross_fit true
-#   flags:  --settings a,b   --learners a,b   --sims a:b|a,b,c   --cross_fit true,false
-# Interactive: setwd() to this directory, edit the values below, run top to bottom.
+#   flags:  --settings <ids and/or preset names>  (REQUIRED)
+#           --learners a,b   --sims a:b|a,b,c   --cross_fit true,false
+# Interactive: edit the values below (and CONFIG_FILE further down), run top to bottom.
 # Runtime per sim (Apple Silicon, 1 thread): parametric/parametric_strat ~2 s;
 # ranger_naimi ~4 s; oracle <1 s; sl_balzer_screened ~20 s nocf / ~50 s cf;
 # sl_naimi_v1_adapt and sl_default_screened ~15-60 s nocf, several minutes cf;
 # hal_s1_d2_acic ~1-3 min nocf, ~5-15 min cf. Each (setting, sim) is
 # seed-isolated, so sharding across processes by --settings is safe.
 
-settings  <- NULL   # NULL = all 44 (ACIC ids); otherwise e.g. c(4, 24)
+settings  <- NULL   # REQUIRED: setting ids and/or preset names, e.g. c(4, 24) or "manuscript"
 learners  <- NULL   # NULL = roster in config.yaml; otherwise e.g. c("parametric", "oracle")
-sims      <- NULL   # NULL = 1..n_sims; otherwise e.g. 1:5 or c(3, 7)
+sims      <- NULL   # NULL = 1..n_sims from config.yaml; otherwise e.g. 1:5 or c(3, 7)
 cross_fit <- NULL   # NULL = both; otherwise TRUE and/or FALSE
 
 # Command-line flags override the values above
@@ -91,32 +93,46 @@ if (length(args) > 0) {
     if (grepl(":", s)) { r <- as.integer(strsplit(s, ":")[[1]]); r[1]:r[2] }
     else as.integer(strsplit(s, ",")[[1]])
   }
-  if (!is.na(opt["--settings"]))  settings  <- parse_ids(opt["--settings"])
+  if (!is.na(opt["--settings"]))  settings  <- trimws(strsplit(opt["--settings"], ",")[[1]])
   if (!is.na(opt["--learners"]))  learners  <- strsplit(opt["--learners"], ",")[[1]]
   if (!is.na(opt["--sims"]))      sims      <- parse_ids(opt["--sims"])
   if (!is.na(opt["--cross_fit"])) cross_fit <- as.logical(strsplit(opt["--cross_fit"], ",")[[1]])
 }
 
 # --- Config and paths --------------------------------------------------------
-PROJECT_ROOT <- {
-  f <- grep("--file=", commandArgs(trailingOnly = FALSE), value = TRUE)
-  if (length(f) > 0) dirname(normalizePath(sub("--file=", "", f))) else getwd()
-}
-CONFIG <- yaml::read_yaml(file.path(PROJECT_ROOT, "config.yaml"))
+# Path to this repository's config.yaml. Fine as-is when you run the script with
+# Rscript from the repository; if you run it line by line, PUT THE FULL PATH HERE
+# (e.g. "~/ACIC-plasmode-pipeline/config.yaml").
+CONFIG_FILE <- "config.yaml"
+CONFIG      <- yaml::read_yaml(CONFIG_FILE)
+REPO_DIR    <- dirname(CONFIG_FILE)
 
-ALL_SETTINGS <- vapply(CONFIG$settings$rows, function(r) as.integer(r[[2]]), integer(1))
-if (is.null(settings))  settings  <- ALL_SETTINGS
+# Expand `--settings` tokens (setting ids and/or preset names from config.yaml).
+# Script 01 owns the setting definitions; here we only need the ids, since every
+# dataset carries its own knobs and seeds.
+resolve_settings <- function(tokens) {
+  presets <- CONFIG$settings$presets
+  if (is.null(tokens) || !length(tokens))
+    stop("--settings is required: give setting ids and/or preset names (",
+         paste(names(presets), collapse = ", "), "), e.g. --settings 4,24", call. = FALSE)
+  unique(unlist(lapply(as.character(tokens), function(tk) {
+    if (grepl("^[0-9]+$", tk)) return(as.integer(tk))
+    if (!is.null(presets[[tk]])) return(as.integer(unlist(presets[[tk]])))
+    stop("Unknown setting or preset: '", tk, "'. Presets: ",
+         paste(names(presets), collapse = ", "), call. = FALSE)
+  }), use.names = FALSE))
+}
+
+settings <- resolve_settings(settings)
 if (is.null(learners))  learners  <- CONFIG$learners
 if (is.null(sims))      sims      <- seq_len(CONFIG$dgp$n_sims)
 if (is.null(cross_fit)) cross_fit <- CONFIG$estimation$cross_fit_options
-bad <- setdiff(settings, ALL_SETTINGS)
-if (length(bad)) stop("Unknown setting id(s): ", paste(bad, collapse = ", "))
 
 PI_BOUNDS <- as.numeric(CONFIG$estimation$pi_bounds)   # propensity truncation (every learner)
 K_FOLDS   <- as.integer(CONFIG$estimation$k_folds)     # cross-fitting folds
 
-data_dir     <- file.path(PROJECT_ROOT, CONFIG$paths$data_inputs)
-nuisance_dir <- file.path(PROJECT_ROOT, CONFIG$paths$data_processed)
+data_dir     <- file.path(REPO_DIR, CONFIG$paths$data_inputs)
+nuisance_dir <- file.path(REPO_DIR, CONFIG$paths$data_processed)
 
 suppressPackageStartupMessages({
   library(ranger); library(dbarts)
@@ -729,37 +745,38 @@ LEARNERS <- list(
 unknown <- setdiff(learners, names(LEARNERS))
 if (length(unknown) > 0) stop("Unknown learner(s): ", paste(unknown, collapse = ", "))
 
-read_sim <- function(acic_id, sim_id) {
-  f <- file.path(data_dir, sprintf("setting_%d", acic_id), sprintf("sim_%04d.rds", sim_id))
+read_sim <- function(setting_id, sim_id) {
+  f <- file.path(data_dir, sprintf("setting_%d", setting_id), sprintf("sim_%04d.rds", sim_id))
   if (!file.exists(f)) stop("Missing ", f, " - run 01_generate_dgp_data.R first")
   s <- readRDS(f)
-  if (!isTRUE(s$acic_id == acic_id) || !isTRUE(s$sim_id == sim_id) || !isTRUE(s$k_folds == K_FOLDS))
-    stop("Cached ", f, " does not match config.yaml")
+  if (!isTRUE(s$setting_id == setting_id) || !isTRUE(s$sim_id == sim_id) ||
+      !isTRUE(s$k_folds == K_FOLDS))
+    stop("Cached ", f, " does not match this run (setting / sim / folds)")
   s
 }
 
 pkg_versions <- function(pk) vapply(pk, function(p)
   tryCatch(as.character(packageVersion(p)), error = function(e) NA_character_), character(1))
 
-for (acic_id in settings) {
+for (setting_id in settings) {
   for (learner_name in learners) {
     learner <- LEARNERS[[learner_name]]
     for (cf in cross_fit) {
       cf_label <- if (cf) "cf" else "nocf"
       if (cf && is.null(learner$fit_cf)) {
-        message(sprintf("[setting %d/%s/cf] no cross-fit arm for this learner; skipped", acic_id, learner_name))
+        message(sprintf("[setting %d/%s/cf] no cross-fit arm for this learner; skipped", setting_id, learner_name))
         next
       }
-      out_dir   <- file.path(nuisance_dir, sprintf("setting_%d", acic_id), "nuisance", learner_name)
+      out_dir   <- file.path(nuisance_dir, sprintf("setting_%d", setting_id), "nuisance", learner_name)
       out_files <- file.path(out_dir, sprintf("sim_%04d_%s.rds", sims, cf_label))
       dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
       todo <- which(!file.exists(out_files))
       message(sprintf("[setting %d/%s/%s] %d of %d sims to fit",
-                      acic_id, learner_name, cf_label, length(todo), length(sims)))
+                      setting_id, learner_name, cf_label, length(todo), length(sims)))
 
       for (i in todo) {
-        sim_data <- read_sim(acic_id, sims[i])
+        sim_data <- read_sim(setting_id, sims[i])
         replay_rng_state(sim_data)                        # RNG state as after data generation
         folds <- NULL
         if (cf) {
@@ -785,7 +802,7 @@ for (acic_id in settings) {
           mu0hat = as.numeric(nuisance$mu0hat),
           mu1hat = as.numeric(nuisance$mu1hat),
           learner = learner_name, cross_fit = cf,
-          acic_id = acic_id, sim_id = sims[i],
+          setting_id = setting_id, label = sim_data$label, sim_id = sims[i],
           fold_id = folds, pi_bounds = PI_BOUNDS,
           nuisance_time      = el[["user.self"]] + el[["sys.self"]],
           nuisance_time_wall = as.numeric(difftime(Sys.time(), t0, units = "secs")),

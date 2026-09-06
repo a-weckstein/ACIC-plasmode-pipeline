@@ -28,69 +28,125 @@ dgp:
   subsample_seed_namespaced_multiplier: 1000
   fold_seed_multiplier: 1000
 
-# --- The 44 DGP settings (manuscript Table S2) ---------------------------------
-# columns: manuscript DGP id; ACIC id; the six dgp_2016 knobs; subsample-seed
-# scheme. Numbered ACIC ids (<= 77) are rows of aciccomp2016::parameters_2016
-# (knobs listed here are cross-checked against the package at load time).
-# ACIC ids >= 100 are CUSTOM settings built with the same machinery:
-#   1xx = full-overlap twins of the one-term setting (id - 100), "legacy" seed
-#         (so (1xx, sim k) draws the same subsample rows as (id-100, sim k+1));
-#   2xx = knob combinations with no numbered analog, "namespaced" seed.
+# --- DGP settings -------------------------------------------------------------
+# There is no fixed grid: you choose what to run with `--settings`. A setting is
+# EITHER a built-in ACIC row OR a custom knob combination, and is addressed by a
+# numeric id.
+#
+#   BUILT-IN  id 1-77   the knobs of aciccomp2016::parameters_2016[id, ]. Uses
+#                       dgp_2016's curated random-seed table, which holds 100
+#                       seeds per setting -- so sim ids must be 1-100.
+#   CUSTOM    id >= 100 defined under `custom:` below (or passed at run time with
+#                       --knobs/--label; see 01_generate_dgp_data.R). The knob
+#                       list is handed to dgp_2016() with sim_id as the seed, so
+#                       there is no limit on the number of replicates.
+#
+# Accepted knob values (aciccomp2016). NOTE dgp_2016() does NOT validate
+# `overlap.trt` or `te.hetero`: an unrecognised value is silently treated as
+# one-term / none. Script 01 therefore rejects anything not listed here.
+#   model.trt    linear | polynomial | step | interaction | pure.polynomial
+#   root.trt     treatment prevalence, in (0, 1)   [competition grid: 0.35, 0.65]
+#   overlap.trt  full | one-term | two-term        (one-term = partial overlap,
+#                                                   induced for the untreated only)
+#   model.rsp    linear | exponential | step | polynomial | interaction | pure.polynomial
+#   alignment    0 to 1                            [competition grid: 0, 0.25, 0.75]
+#   te.hetero    none | med | high
+#
+# Subsample-seed scheme (for the n=1,000 draw; built-in settings always use
+# `legacy`):
+#   legacy       sim_id * 100 + id
+#   namespaced   500000 + sim_id * 1000 + id     (disjoint from the legacy space)
+# Use `legacy` for a custom setting deliberately MATCHED to a built-in one: with
+# it, custom id 1xx at sim k draws the SAME n=1,000 rows as built-in setting
+# (id - 100) at sim k+1, because k*100 + (id) == (k+1)*100 + (id - 100). That is
+# what makes the manuscript's overlap contrasts paired on covariates. Use
+# `namespaced` for a custom setting with no built-in counterpart (independent
+# draws).
 settings:
-  columns: [dgp_id, acic_id, model.trt, root.trt, overlap.trt, model.rsp, alignment, te.hetero, seed_scheme]
-  rows:
-    - [ 1, 101, linear,     0.35, full,     linear,      0.75, high, legacy]
-    - [ 2, 105, linear,     0.35, full,     exponential, 0.75, high, legacy]
-    - [ 3, 106, polynomial, 0.35, full,     linear,      0.75, high, legacy]
-    - [ 4, 113, linear,     0.65, full,     exponential, 0.75, high, legacy]
-    - [ 5, 204, linear,     0.35, full,     step,        0.75, high, namespaced]
-    - [ 6, 205, step,       0.35, full,     linear,      0.75, high, namespaced]
-    - [ 7, 206, linear,     0.35, full,     step,        0.25, med,  namespaced]
-    - [ 8, 207, step,       0.35, full,     linear,      0.25, med,  namespaced]
-    - [ 9,   4, polynomial, 0.35, full,     exponential, 0.75, high, legacy]
-    - [10,  28, polynomial, 0.35, full,     step,        0.25, high, legacy]
-    - [11,  29, polynomial, 0.35, full,     step,        0.75, med,  legacy]
-    - [12,  30, polynomial, 0.35, full,     step,        0.75, high, legacy]
-    - [13,  32, polynomial, 0.35, full,     exponential, 0.25, high, legacy]
-    - [14,  33, polynomial, 0.35, full,     exponential, 0.75, med,  legacy]
-    - [15,  41, polynomial, 0.65, full,     step,        0.25, high, legacy]
-    - [16,  42, polynomial, 0.65, full,     step,        0.75, med,  legacy]
-    - [17,  43, polynomial, 0.65, full,     step,        0.75, high, legacy]
-    - [18,  45, polynomial, 0.65, full,     exponential, 0.25, high, legacy]
-    - [19,  46, polynomial, 0.65, full,     exponential, 0.75, med,  legacy]
-    - [20,  47, polynomial, 0.65, full,     exponential, 0.75, high, legacy]
-    - [21,  56, step,       0.35, full,     step,        0.25, high, legacy]
-    - [22,  57, step,       0.35, full,     step,        0.75, med,  legacy]
-    - [23,  58, step,       0.35, full,     step,        0.75, high, legacy]
-    - [24,  60, step,       0.35, full,     exponential, 0.25, high, legacy]
-    - [25,  61, step,       0.35, full,     exponential, 0.75, med,  legacy]
-    - [26,  62, step,       0.35, full,     exponential, 0.75, high, legacy]
-    - [27,  71, step,       0.65, full,     step,        0.25, high, legacy]
-    - [28,  72, step,       0.65, full,     step,        0.75, med,  legacy]
-    - [29,  73, step,       0.65, full,     step,        0.75, high, legacy]
-    - [30,  75, step,       0.65, full,     exponential, 0.25, high, legacy]
-    - [31,  76, step,       0.65, full,     exponential, 0.75, med,  legacy]
-    - [32,  77, step,       0.65, full,     exponential, 0.75, high, legacy]
-    - [33, 103, linear,     0.35, full,     linear,      0.75, none, legacy]
-    - [34, 102, polynomial, 0.35, full,     exponential, 0.75, none, legacy]
-    - [35, 203, step,       0.35, full,     exponential, 0.75, none, namespaced]
-    - [36,   2, polynomial, 0.35, one-term, exponential, 0.75, none, legacy]
-    - [37,   3, linear,     0.35, one-term, linear,      0.75, none, legacy]
-    - [38,   5, linear,     0.35, one-term, exponential, 0.75, high, legacy]
-    - [39,   6, polynomial, 0.35, one-term, linear,      0.75, high, legacy]
-    - [40,   7, polynomial, 0.35, one-term, exponential, 0.75, high, legacy]
-    - [41,   8, polynomial, 0.35, one-term, exponential, 0.00, high, legacy]
-    - [42,   9, step,       0.35, one-term, step,        0.75, high, legacy]
-    - [43,  24, polynomial, 0.35, one-term, step,        0.75, high, legacy]
-    - [44,  54, step,       0.35, one-term, exponential, 0.75, high, legacy]
+
+  # --- custom settings ---------------------------------------------------------
+  # The manuscript's 11 custom DGPs. 1xx = the full-overlap twin of built-in
+  # setting (id - 100): identical knobs except overlap.trt (one-term -> full).
+  # 2xx = knob combinations with no built-in counterpart. Add your own here with
+  # an unused id (>= 100), a label, the six knobs and a seed scheme.
+  custom:
+    - {id: 101, label: "DGP 01 (custom): full-overlap twin of ACIC 1",   model.trt: linear,     root.trt: 0.35, overlap.trt: full, model.rsp: linear,      alignment: 0.75, te.hetero: high, seed_scheme: legacy}
+    - {id: 105, label: "DGP 02 (custom): full-overlap twin of ACIC 5",   model.trt: linear,     root.trt: 0.35, overlap.trt: full, model.rsp: exponential, alignment: 0.75, te.hetero: high, seed_scheme: legacy}
+    - {id: 106, label: "DGP 03 (custom): full-overlap twin of ACIC 6",   model.trt: polynomial, root.trt: 0.35, overlap.trt: full, model.rsp: linear,      alignment: 0.75, te.hetero: high, seed_scheme: legacy}
+    - {id: 113, label: "DGP 04 (custom): full-overlap twin of ACIC 13",  model.trt: linear,     root.trt: 0.65, overlap.trt: full, model.rsp: exponential, alignment: 0.75, te.hetero: high, seed_scheme: legacy}
+    - {id: 103, label: "DGP 33 (custom): full-overlap twin of ACIC 3",   model.trt: linear,     root.trt: 0.35, overlap.trt: full, model.rsp: linear,      alignment: 0.75, te.hetero: none, seed_scheme: legacy}
+    - {id: 102, label: "DGP 34 (custom): full-overlap twin of ACIC 2",   model.trt: polynomial, root.trt: 0.35, overlap.trt: full, model.rsp: exponential, alignment: 0.75, te.hetero: none, seed_scheme: legacy}
+    - {id: 204, label: "DGP 05 (custom): linear PS / step outcome",      model.trt: linear,     root.trt: 0.35, overlap.trt: full, model.rsp: step,        alignment: 0.75, te.hetero: high, seed_scheme: namespaced}
+    - {id: 205, label: "DGP 06 (custom): step PS / linear outcome",      model.trt: step,       root.trt: 0.35, overlap.trt: full, model.rsp: linear,      alignment: 0.75, te.hetero: high, seed_scheme: namespaced}
+    - {id: 206, label: "DGP 07 (custom): linear PS / step outcome, low alignment",  model.trt: linear, root.trt: 0.35, overlap.trt: full, model.rsp: step,   alignment: 0.25, te.hetero: med,  seed_scheme: namespaced}
+    - {id: 207, label: "DGP 08 (custom): step PS / linear outcome, low alignment",  model.trt: step,   root.trt: 0.35, overlap.trt: full, model.rsp: linear, alignment: 0.25, te.hetero: med,  seed_scheme: namespaced}
+    - {id: 203, label: "DGP 35 (custom): step PS / exponential outcome, no heterogeneity", model.trt: step, root.trt: 0.35, overlap.trt: full, model.rsp: exponential, alignment: 0.75, te.hetero: none, seed_scheme: namespaced}
+
+  # --- display labels for built-in settings ------------------------------------
+  # Optional; a built-in setting with no entry is labelled "ACIC <id>". These are
+  # the manuscript's Table S2 DGP numbers.
+  labels:
+    4:  "DGP 09 (ACIC 4)"
+    28: "DGP 10 (ACIC 28)"
+    29: "DGP 11 (ACIC 29)"
+    30: "DGP 12 (ACIC 30)"
+    32: "DGP 13 (ACIC 32)"
+    33: "DGP 14 (ACIC 33)"
+    41: "DGP 15 (ACIC 41)"
+    42: "DGP 16 (ACIC 42)"
+    43: "DGP 17 (ACIC 43)"
+    45: "DGP 18 (ACIC 45)"
+    46: "DGP 19 (ACIC 46)"
+    47: "DGP 20 (ACIC 47)"
+    56: "DGP 21 (ACIC 56)"
+    57: "DGP 22 (ACIC 57)"
+    58: "DGP 23 (ACIC 58)"
+    60: "DGP 24 (ACIC 60)"
+    61: "DGP 25 (ACIC 61)"
+    62: "DGP 26 (ACIC 62)"
+    71: "DGP 27 (ACIC 71)"
+    72: "DGP 28 (ACIC 72)"
+    73: "DGP 29 (ACIC 73)"
+    75: "DGP 30 (ACIC 75)"
+    76: "DGP 31 (ACIC 76)"
+    77: "DGP 32 (ACIC 77)"
+    2:  "DGP 36 (ACIC 2)"
+    3:  "DGP 37 (ACIC 3)"
+    5:  "DGP 38 (ACIC 5)"
+    6:  "DGP 39 (ACIC 6)"
+    7:  "DGP 40 (ACIC 7)"
+    8:  "DGP 41 (ACIC 8)"
+    9:  "DGP 42 (ACIC 9)"
+    24: "DGP 43 (ACIC 24)"
+    54: "DGP 44 (ACIC 54)"
+
+  # --- named id lists ----------------------------------------------------------
+  # `--settings <name>` expands a preset; ids and preset names can be mixed,
+  # e.g. `--settings manuscript_full_overlap,24`.
+  presets:
+    # the manuscript's 44 DGPs, in Table S2 order (DGP 1-44)
+    manuscript: [101, 105, 106, 113, 204, 205, 206, 207,
+                 4, 28, 29, 30, 32, 33, 41, 42, 43, 45, 46, 47,
+                 56, 57, 58, 60, 61, 62, 71, 72, 73, 75, 76, 77,
+                 103, 102, 203,
+                 2, 3, 5, 6, 7, 8, 9, 24, 54]
+    # the 35 full-overlap DGPs (ATE and CATE are identified only here)
+    manuscript_full_overlap: [101, 105, 106, 113, 204, 205, 206, 207,
+                              4, 28, 29, 30, 32, 33, 41, 42, 43, 45, 46, 47,
+                              56, 57, 58, 60, 61, 62, 71, 72, 73, 75, 76, 77,
+                              103, 102, 203]
+    # the 9 one-term (partial overlap) DGPs; the ATT is still identified
+    manuscript_one_term: [2, 3, 5, 6, 7, 8, 9, 24, 54]
+    # a cheap two-setting slice for smoke tests (one full overlap, one one-term)
+    demo: [4, 24]
 
 # --- Estimation settings ------------------------------------------------------
 estimation:
   pi_bounds: [0.025, 0.975]        # propensity truncation, applied to every learner before any estimator
   k_folds: 5                       # cross-fitting folds (shared across learners within a sim)
   cross_fit_options: [false, true]
-  estimands: [ATE, ATT]
-  estimators: [tmle, aipw, ipw, gcomp]   # each run for the ATE and the ATT
+  # The estimators (TMLE, AIPW, Hajek IPW, G-computation, each for the ATE and
+  # the ATT) are fixed in 03_run_ate_estimators.R.
 
 # --- Nuisance learners (manuscript roster; store keys) --------------------------
 #   parametric           "Parametric"  (ATE/ATT displays; pooled Y ~ A + X outcome model)

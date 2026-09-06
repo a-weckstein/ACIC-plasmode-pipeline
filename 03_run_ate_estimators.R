@@ -16,20 +16,22 @@
 #                (a learner property; recorded on the ATE rows)
 #
 # Writes one CSV per cell, one row per (sim, estimand, estimator):
-#   results/per_config/setting_<acic_id>/<learner>_<cf|nocf>.csv
+#   results/per_config/setting_<id>/<learner>_<cf|nocf>.csv
 # Re-running replaces the rows for the requested sims and keeps the rest.
 # =============================================================================
 
 # --- Settings ----------------------------------------------------------------
 # Command line:
 #   Rscript 03_run_ate_estimators.R --settings 4,24 --sims 1:5
+#   Rscript 03_run_ate_estimators.R --settings manuscript
 #   Rscript 03_run_ate_estimators.R --settings 24 --learners parametric,oracle
-#   flags:  --settings a,b   --learners a,b   --sims a:b|a,b,c   --cross_fit true,false
-# Interactive: setwd() to this directory, edit the values below, run top to bottom.
+#   flags:  --settings <ids and/or preset names>  (REQUIRED)
+#           --learners a,b   --sims a:b|a,b,c   --cross_fit true,false
+# Interactive: edit the values below (and CONFIG_FILE further down), run top to bottom.
 
-settings  <- NULL   # NULL = all 44 (ACIC ids); otherwise e.g. c(4, 24)
+settings  <- NULL   # REQUIRED: setting ids and/or preset names, e.g. c(4, 24) or "manuscript"
 learners  <- NULL   # NULL = roster in config.yaml; otherwise e.g. c("parametric", "oracle")
-sims      <- NULL   # NULL = 1..n_sims; otherwise e.g. 1:5 or c(3, 7)
+sims      <- NULL   # NULL = 1..n_sims from config.yaml; otherwise e.g. 1:5 or c(3, 7)
 cross_fit <- NULL   # NULL = both; otherwise TRUE and/or FALSE
 
 # Command-line flags override the values above
@@ -43,33 +45,50 @@ if (length(args) > 0) {
     if (grepl(":", s)) { r <- as.integer(strsplit(s, ":")[[1]]); r[1]:r[2] }
     else as.integer(strsplit(s, ",")[[1]])
   }
-  if (!is.na(opt["--settings"]))  settings  <- parse_ids(opt["--settings"])
+  if (!is.na(opt["--settings"]))  settings  <- trimws(strsplit(opt["--settings"], ",")[[1]])
   if (!is.na(opt["--learners"]))  learners  <- strsplit(opt["--learners"], ",")[[1]]
   if (!is.na(opt["--sims"]))      sims      <- parse_ids(opt["--sims"])
   if (!is.na(opt["--cross_fit"])) cross_fit <- as.logical(strsplit(opt["--cross_fit"], ",")[[1]])
 }
 
 # --- Config and paths --------------------------------------------------------
-PROJECT_ROOT <- {
-  f <- grep("--file=", commandArgs(trailingOnly = FALSE), value = TRUE)
-  if (length(f) > 0) dirname(normalizePath(sub("--file=", "", f))) else getwd()
-}
-CONFIG <- yaml::read_yaml(file.path(PROJECT_ROOT, "config.yaml"))
+# Path to this repository's config.yaml. Fine as-is when you run the script with
+# Rscript from the repository; if you run it line by line, PUT THE FULL PATH HERE
+# (e.g. "~/ACIC-plasmode-pipeline/config.yaml").
+CONFIG_FILE <- "config.yaml"
+CONFIG      <- yaml::read_yaml(CONFIG_FILE)
+REPO_DIR    <- dirname(CONFIG_FILE)
 
-ALL_SETTINGS <- vapply(CONFIG$settings$rows, function(r) as.integer(r[[2]]), integer(1))
-if (is.null(settings))  settings  <- ALL_SETTINGS
+# Expand `--settings` tokens (setting ids and/or preset names from config.yaml).
+resolve_settings <- function(tokens) {
+  presets <- CONFIG$settings$presets
+  if (is.null(tokens) || !length(tokens))
+    stop("--settings is required: give setting ids and/or preset names (",
+         paste(names(presets), collapse = ", "), "), e.g. --settings 4,24", call. = FALSE)
+  unique(unlist(lapply(as.character(tokens), function(tk) {
+    if (grepl("^[0-9]+$", tk)) return(as.integer(tk))
+    if (!is.null(presets[[tk]])) return(as.integer(unlist(presets[[tk]])))
+    stop("Unknown setting or preset: '", tk, "'. Presets: ",
+         paste(names(presets), collapse = ", "), call. = FALSE)
+  }), use.names = FALSE))
+}
+
+settings <- resolve_settings(settings)
 if (is.null(learners))  learners  <- CONFIG$learners
 if (is.null(sims))      sims      <- seq_len(CONFIG$dgp$n_sims)
 if (is.null(cross_fit)) cross_fit <- CONFIG$estimation$cross_fit_options
 
 PI_BOUNDS    <- as.numeric(CONFIG$estimation$pi_bounds)
-data_dir     <- file.path(PROJECT_ROOT, CONFIG$paths$data_inputs)
-nuisance_dir <- file.path(PROJECT_ROOT, CONFIG$paths$data_processed)
-results_dir  <- file.path(PROJECT_ROOT, CONFIG$paths$results, "per_config")
+data_dir     <- file.path(REPO_DIR, CONFIG$paths$data_inputs)
+nuisance_dir <- file.path(REPO_DIR, CONFIG$paths$data_processed)
+results_dir  <- file.path(REPO_DIR, CONFIG$paths$results, "per_config")
 
 suppressPackageStartupMessages(library(tmle))
 
 Z975 <- 1.959964   # normal 97.5% quantile for the Wald CIs
+# The six DGP knobs travel from the cached dataset into every result row, so
+# script 04 can summarise by DGP characteristics without re-reading config.yaml.
+KNOB_COLS <- c("model.trt", "root.trt", "overlap.trt", "model.rsp", "alignment", "te.hetero")
 
 
 # =============================================================================
@@ -221,20 +240,20 @@ pehe_t_fn <- function(mu0hat, mu1hat, tau_true)
 # ==== Driver
 # =============================================================================
 
-read_sim <- function(acic_id, sim_id) {
-  f <- file.path(data_dir, sprintf("setting_%d", acic_id), sprintf("sim_%04d.rds", sim_id))
+read_sim <- function(setting_id, sim_id) {
+  f <- file.path(data_dir, sprintf("setting_%d", setting_id), sprintf("sim_%04d.rds", sim_id))
   if (!file.exists(f)) stop("Missing ", f, " - run 01_generate_dgp_data.R first")
   s <- readRDS(f)
-  if (!isTRUE(s$acic_id == acic_id) || !isTRUE(s$sim_id == sim_id))
-    stop("Cached ", f, " does not match config.yaml")
+  if (!isTRUE(s$setting_id == setting_id) || !isTRUE(s$sim_id == sim_id))
+    stop("Cached ", f, " does not match this run (setting / sim)")
   s
 }
 
 # Script 02 saves one .rds per cell. A .csv with columns pihat, mu0hat, mu1hat
 # (e.g. a Python track writing raw, untruncated vectors) is accepted in the
 # same location. Either way pihat is truncated to PI_BOUNDS here.
-read_nuisance <- function(acic_id, learner_name, sim_id, cf_label) {
-  stem <- file.path(nuisance_dir, sprintf("setting_%d", acic_id), "nuisance", learner_name,
+read_nuisance <- function(setting_id, learner_name, sim_id, cf_label) {
+  stem <- file.path(nuisance_dir, sprintf("setting_%d", setting_id), "nuisance", learner_name,
                     sprintf("sim_%04d_%s", sim_id, cf_label))
   if (file.exists(paste0(stem, ".rds"))) {
     nu <- readRDS(paste0(stem, ".rds"))
@@ -276,7 +295,9 @@ estimate_cell <- function(s, nu, learner_name, cf) {
     for (est in names(res[[estimand]])) {
       r <- res[[estimand]][[est]]
       rows[[length(rows) + 1]] <- data.frame(
-        acic_id = s$acic_id, dgp_id = s$dgp_id, sim_id = s$sim_id,
+        setting_id = s$setting_id, label = s$label, sim_id = s$sim_id,
+        setNames(as.list(as.character(unlist(s$knobs[KNOB_COLS]))),
+                 gsub("\\.", "_", KNOB_COLS)),
         learner = learner_name, cross_fit = cf,
         estimand = estimand, estimator = est,
         estimate = r$estimate, se = r$se, ci_lower = r$ci_lower, ci_upper = r$ci_upper,
@@ -293,29 +314,29 @@ estimate_cell <- function(s, nu, learner_name, cf) {
 
 dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
 
-for (acic_id in settings) {
+for (setting_id in settings) {
   for (learner_name in learners) {
     for (cf in cross_fit) {
       cf_label <- if (cf) "cf" else "nocf"
-      out_dir  <- file.path(results_dir, sprintf("setting_%d", acic_id))
+      out_dir  <- file.path(results_dir, sprintf("setting_%d", setting_id))
       out_file <- file.path(out_dir, sprintf("%s_%s.csv", learner_name, cf_label))
 
       rows <- list()
       for (sim_id in sims) {
-        nu <- read_nuisance(acic_id, learner_name, sim_id, cf_label)
+        nu <- read_nuisance(setting_id, learner_name, sim_id, cf_label)
         if (is.null(nu)) next
-        s <- read_sim(acic_id, sim_id)
+        s <- read_sim(setting_id, sim_id)
         stopifnot(length(nu$pihat) == s$n)
         rows[[length(rows) + 1]] <- estimate_cell(s, nu, learner_name, cf)
       }
       if (!length(rows)) {
         if (!(cf && learner_name == "oracle"))
-          message(sprintf("[setting %d/%s/%s] no nuisance files found", acic_id, learner_name, cf_label))
+          message(sprintf("[setting %d/%s/%s] no nuisance files found", setting_id, learner_name, cf_label))
         next
       }
       res <- do.call(rbind, rows)
       message(sprintf("[setting %d/%s/%s] %d of %d sims estimated",
-                      acic_id, learner_name, cf_label, length(rows), length(sims)))
+                      setting_id, learner_name, cf_label, length(rows), length(sims)))
 
       dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
       if (file.exists(out_file)) {          # keep rows for sims not requested in this run

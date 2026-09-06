@@ -4,6 +4,8 @@
 # Reads every per-cell CSV written by 03_run_ate_estimators.R and computes the
 # manuscript's evaluation metrics per (DGP setting x learner x cross-fit x
 # estimand x estimator), then macro-averages across the contributing DGPs.
+# Works for whatever settings were actually run: each result row carries its own
+# DGP knobs, so nothing here depends on a fixed grid.
 #
 # Per-setting metrics (50 replicates; every per-sim quantity is graded against
 # that replicate's OWN truth, because the DGP redraws its surfaces every sim):
@@ -34,10 +36,11 @@
 # Command line:
 #   Rscript 04_evaluate_metrics.R
 #   Rscript 04_evaluate_metrics.R --settings 4,24 --learners parametric,oracle
-# Interactive: setwd() to this directory, edit the values below, run top to bottom.
+#   Rscript 04_evaluate_metrics.R --settings manuscript_full_overlap
+# Interactive: edit the values below (and CONFIG_FILE further down), run top to bottom.
 
-settings <- NULL    # NULL = every setting with results; otherwise e.g. c(4, 24)
-learners <- NULL    # NULL = every learner with results; otherwise a subset
+settings <- NULL    # NULL = every setting found in results/; otherwise ids and/or preset names, e.g. c(4, 24)
+learners <- NULL    # NULL = every learner found in results/; otherwise a subset
 
 args <- commandArgs(trailingOnly = TRUE)
 if (length(args) > 0) {
@@ -45,31 +48,32 @@ if (length(args) > 0) {
   opt <- setNames(args[c(FALSE, TRUE)], args[c(TRUE, FALSE)])
   unknown <- setdiff(names(opt), c("--settings", "--learners"))
   if (length(unknown) > 0) stop("Unknown argument(s): ", paste(unknown, collapse = ", "))
-  if (!is.na(opt["--settings"])) settings <- as.integer(strsplit(opt["--settings"], ",")[[1]])
+  if (!is.na(opt["--settings"])) settings <- trimws(strsplit(opt["--settings"], ",")[[1]])
   if (!is.na(opt["--learners"])) learners <- strsplit(opt["--learners"], ",")[[1]]
 }
 
 # --- Config and paths --------------------------------------------------------
-PROJECT_ROOT <- {
-  f <- grep("--file=", commandArgs(trailingOnly = FALSE), value = TRUE)
-  if (length(f) > 0) dirname(normalizePath(sub("--file=", "", f))) else getwd()
-}
-CONFIG <- yaml::read_yaml(file.path(PROJECT_ROOT, "config.yaml"))
-results_dir <- file.path(PROJECT_ROOT, CONFIG$paths$results)
+# Path to this repository's config.yaml. Fine as-is when you run the script with
+# Rscript from the repository; if you run it line by line, PUT THE FULL PATH HERE
+# (e.g. "~/ACIC-plasmode-pipeline/config.yaml").
+CONFIG_FILE <- "config.yaml"
+CONFIG      <- yaml::read_yaml(CONFIG_FILE)
+REPO_DIR    <- dirname(CONFIG_FILE)
+results_dir <- file.path(REPO_DIR, CONFIG$paths$results)
 per_config  <- file.path(results_dir, "per_config")
 
-suppressPackageStartupMessages(library(dplyr))
-
-SETTINGS <- {
-  s <- CONFIG$settings
-  d <- do.call(rbind, lapply(s$rows, function(r) as.data.frame(setNames(r, s$columns),
-                                                             stringsAsFactors = FALSE)))
-  d$dgp_id <- as.integer(d$dgp_id); d$acic_id <- as.integer(d$acic_id)
-  d$root.trt <- as.numeric(d$root.trt); d$alignment <- as.numeric(d$alignment)
-  names(d) <- sub("\\.", "_", names(d))          # model_trt, root_trt, overlap_trt, ...
-  d
+# Expand `--settings` tokens (ids and/or preset names from config.yaml), as in scripts 01-03.
+if (!is.null(settings)) {
+  presets  <- CONFIG$settings$presets
+  settings <- unique(unlist(lapply(as.character(settings), function(tk) {
+    if (grepl("^[0-9]+$", tk)) return(as.integer(tk))
+    if (!is.null(presets[[tk]])) return(as.integer(unlist(presets[[tk]])))
+    stop("Unknown setting or preset: '", tk, "'. Presets: ",
+         paste(names(presets), collapse = ", "), call. = FALSE)
+  }), use.names = FALSE))
 }
 
+suppressPackageStartupMessages(library(dplyr))
 
 # =============================================================================
 # ==== Load the per-sim results
@@ -78,22 +82,23 @@ SETTINGS <- {
 files <- list.files(per_config, pattern = "\\.csv$", recursive = TRUE, full.names = TRUE)
 if (!length(files)) stop("No results found under ", per_config, " - run 03_run_ate_estimators.R first")
 sim_df <- bind_rows(lapply(files, read.csv, stringsAsFactors = FALSE))
-if (!is.null(settings)) sim_df <- filter(sim_df, acic_id %in% settings)
+if (!is.null(settings)) sim_df <- filter(sim_df, setting_id %in% settings)
 if (!is.null(learners)) sim_df <- filter(sim_df, learner %in% learners)
 if (!nrow(sim_df)) stop("No rows left after filtering")
 
+# The DGP knobs travel with the results (written by script 03), so no settings
+# table is needed here: this script summarises whatever was actually run.
 sim_df <- sim_df %>%
   mutate(cross_fit = as.logical(cross_fit)) %>%
-  inner_join(SETTINGS %>% select(-seed_scheme), by = c("acic_id", "dgp_id")) %>%
-  arrange(dgp_id, learner, cross_fit, sim_id, estimand, estimator)
+  arrange(setting_id, learner, cross_fit, sim_id, estimand, estimator)
 
 # one row per (estimand, estimator, setting, learner, cf, sim)
-dup <- sim_df %>% count(acic_id, sim_id, learner, cross_fit, estimand, estimator) %>% filter(n > 1)
+dup <- sim_df %>% count(setting_id, sim_id, learner, cross_fit, estimand, estimator) %>% filter(n > 1)
 if (nrow(dup)) stop("Duplicate per-sim rows found (", nrow(dup), " keys) - re-run 03 for those cells")
 
 write.csv(sim_df, file.path(results_dir, "sim_level_results.csv"), row.names = FALSE)
 message(sprintf("%d per-sim rows | %d settings | learners: %s",
-                nrow(sim_df), n_distinct(sim_df$acic_id),
+                nrow(sim_df), n_distinct(sim_df$setting_id),
                 paste(sort(unique(sim_df$learner)), collapse = ", ")))
 
 
@@ -101,7 +106,7 @@ message(sprintf("%d per-sim rows | %d settings | learners: %s",
 # ==== Per-setting Monte Carlo summaries
 # =============================================================================
 
-knob_cols <- c("dgp_id", "acic_id", "model_trt", "root_trt", "overlap_trt",
+knob_cols <- c("setting_id", "label", "model_trt", "root_trt", "overlap_trt",
                "model_rsp", "alignment", "te_hetero")
 
 by_dgp <- sim_df %>%
@@ -125,11 +130,11 @@ by_dgp <- sim_df %>%
 # RMSE relative to the oracle arm (same setting / estimand / estimator)
 oracle_rmse <- by_dgp %>%
   filter(learner == "oracle") %>%
-  select(acic_id, estimand, estimator, RMSE_oracle = RMSE)
+  select(setting_id, estimand, estimator, RMSE_oracle = RMSE)
 # (NA for G-computation: the oracle's plug-in mean IS the sample truth, so its
 # RMSE is 0 by construction.)
 by_dgp <- by_dgp %>%
-  left_join(oracle_rmse, by = c("acic_id", "estimand", "estimator")) %>%
+  left_join(oracle_rmse, by = c("setting_id", "estimand", "estimator")) %>%
   mutate(RMSE_pct_oracle = ifelse(!is.na(RMSE_oracle) & RMSE_oracle > 1e-12,
                                   100 * RMSE / RMSE_oracle, NA_real_)) %>%
   select(-RMSE_oracle)
@@ -154,15 +159,17 @@ write.csv(pehe_by_dgp, file.path(results_dir, "summary_pehe_by_dgp.csv"), row.na
 # settings a learner contributed; n_dgps reports that denominator.
 
 ev <- CONFIG$evaluation
-keep_settings <- function(rule) {
-  if (identical(rule, "all")) SETTINGS$acic_id else SETTINGS$acic_id[SETTINGS$overlap_trt == "full"]
-}
+# The setting sets come from the knobs in the results themselves, so this works
+# for any DGP that was run, not only the manuscript's.
+all_ids  <- unique(by_dgp$setting_id)
+full_ids <- unique(by_dgp$setting_id[by_dgp$overlap_trt == "full"])
+keep_settings <- function(rule) if (identical(rule, "all")) all_ids else full_ids
 
 macro_effects <- bind_rows(
-  by_dgp %>% filter(estimand == "ATE", acic_id %in% keep_settings(ev$ate_settings)),
-  by_dgp %>% filter(estimand == "ATT", acic_id %in% keep_settings(ev$att_settings))) %>%
+  by_dgp %>% filter(estimand == "ATE", setting_id %in% keep_settings(ev$ate_settings)),
+  by_dgp %>% filter(estimand == "ATT", setting_id %in% keep_settings(ev$att_settings))) %>%
   group_by(estimand, estimator, learner, cross_fit) %>%
-  summarise(n_dgps          = n_distinct(acic_id),
+  summarise(n_dgps          = n_distinct(setting_id),
             rel_bias_pct    = mean(rel_bias_pct, na.rm = TRUE),
             RMSE            = mean(RMSE, na.rm = TRUE),
             RMSE_pct_oracle = mean(RMSE_pct_oracle, na.rm = TRUE),
@@ -172,10 +179,10 @@ macro_effects <- bind_rows(
   mutate(across(c(RMSE_pct_oracle, coverage_pop, SE_ratio_pop), ~ ifelse(is.nan(.x), NA, .x)))
 
 macro_pehe <- pehe_by_dgp %>%
-  filter(acic_id %in% keep_settings(ev$pehe_settings),
+  filter(setting_id %in% keep_settings(ev$pehe_settings),
          if (isTRUE(ev$pehe_cross_fit_only)) cross_fit else TRUE) %>%
   group_by(learner, cross_fit) %>%
-  summarise(n_dgps = n_distinct(acic_id), mean_pehe_t = mean(mean_pehe_t), .groups = "drop") %>%
+  summarise(n_dgps = n_distinct(setting_id), mean_pehe_t = mean(mean_pehe_t), .groups = "drop") %>%
   mutate(estimand = "CATE", estimator = "t_learner") %>%
   select(estimand, estimator, learner, cross_fit, n_dgps, mean_pehe_t)
 
