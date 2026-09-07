@@ -1,83 +1,44 @@
 # =============================================================================
 # 02_run_nuisance_learners.R — fit the nuisance learners (Simulation 2)
 #
-# For every (setting x learner x cross-fit x sim) cell: estimate the nuisance
-# functions on the cached dataset from 01_generate_dgp_data.R and save the
-# fitted vectors. Script 03 then runs the ATE/ATT estimators on them.
-#   pihat   estimated propensity P(A=1|X)
-#   mu0hat  estimated E[Y|A=0,X]   (predicted for ALL units)
-#   mu1hat  estimated E[Y|A=1,X]   (predicted for ALL units)
-# Every estimator consumes only these three vectors, so the learner is the
-# sole moving part.
-#
-# Writes, per cell:
+# For each (setting, learner, cross-fit, sim) cell, estimate pihat = P(A=1|X),
+# mu0hat = E[Y|A=0,X] and mu1hat = E[Y|A=1,X] on the cached dataset from
+# script 01 and save the three vectors to
 #   _data_processed/setting_<id>/nuisance/<learner>/sim_XXXX_<cf|nocf>.rds
-#   = list(pihat, mu0hat, mu1hat, fold_id, nuisance_time, nuisance_time_wall, ...)
-# Resume-safe: cells whose file already exists are skipped.
+# Existing cells are skipped, so runs can be resumed or sharded by setting.
 #
-# Two tracks per learner, plus the oracle arm:
-#   IN-SAMPLE (nocf): fit on all n=1000 rows, predict on the same rows.
-#   CROSS-FIT (cf)  : 5-fold sample splitting (Chernozhukov et al. 2018, DML2):
-#                     nuisances for fold k are predicted by models fit on the
-#                     other folds; folds are shared across learners within a sim.
-#   ORACLE          : the DGP's own true propensity (truncated like every
-#                     estimated learner) and true conditional means. No CF arm.
-# Outcome models are arm-stratified (separate fits on A==0 and A==1 rows) for
-# every learner EXCEPT `parametric`, a single pooled Y ~ A + X GLM (S-learner;
-# its implied CATE is a constant). Its arm-stratified counterpart
-# `parametric_strat` (parametric T-learner) is the "Parametric" learner of the
-# CATE/PEHE displays; ATE/ATT displays use the pooled `parametric`.
+# Tracks: nocf = fit on all n rows and predict the same rows; cf = 5-fold
+# cross-fitting, with folds shared across learners within a sim. The oracle
+# arm plugs in the DGP's true propensity (truncated) and conditional means and
+# has no cf track. Outcome models are fit separately by arm for every learner
+# except `parametric`, which uses one pooled Y ~ A + X GLM (`parametric_strat`
+# is its arm-stratified counterpart, used for the CATE/PEHE results).
 #
-# Learner roster (manuscript labels):
-#   parametric           "Parametric": logistic PS + pooled linear outcome, main effects
-#   parametric_strat     "Parametric" of the CATE displays: arm-stratified outcome GLMs
-#   ranger_naimi         "Random Forest": ranger, default-rule mtry (floor(sqrt p) = 8),
-#                        min.node.size CV-selected in {30, 60} per nuisance,
-#                        in-bag predictions; content-seeded
-#   sl_naimi_v1_adapt    "SL Naimi": the Naimi et al. (2023) SuperLearner
-#                        [tuned RF x2 + XGBoost x2 + GAM x6], adapted to p=80
-#                        (default-rule mtry for the RF candidates; corRank top-20
-#                        screen on the GAM candidates)
-#   sl_balzer_screened   "SL Balzer": GLM + step.interaction (corRank top-10
-#                        screened) + MARS (earth) + mean
-#   sl_default_screened  "SL Default": the tmle-package default SuperLearner
-#                        libraries; smoothers (BART, GAM) corRank top-20 screened
-#   hal_s1_d2_acic       "HAL": hal9001 fit_hal, smoothness_orders 1, max_degree 2,
-#                        num_knots c(25, 10), corRank top-10 screen
-#   oracle               plug-in truth: e (truncated), mu.0, mu.1
-# TabPFN v3 (cloud API) is described in the README; it is not part of this code.
+# Learners (manuscript label): parametric ("Parametric"), parametric_strat
+# ("Parametric", CATE), ranger_naimi ("Random Forest"), sl_naimi_v1_adapt
+# ("SL Naimi"), sl_balzer_screened ("SL Balzer"), sl_default_screened
+# ("SL Default"), hal_s1_d2_acic ("HAL"), oracle. TabPFN v3 is described in
+# the README and is not part of this script.
 #
-# REPRODUCIBILITY. Each learner's fit is reproducible per (setting, sim):
-#   * ranger_naimi is seeded from a checksum of (Y, A, X) and restores the
-#     ambient RNG state afterwards (content-seeded);
-#   * hal_s1_d2_acic is fully deterministic (systematic lasso-CV folds, no
-#     RNG) -- but its basis enumeration depends on the hal9001 VERSION (the
-#     reported numbers used 0.4.6);
-#   * parametric, parametric_strat and oracle are deterministic;
-#   * the SuperLearner ensembles consume the AMBIENT RNG stream (internal CV
-#     folds, candidate fits). That stream is pinned by the seed protocol of
-#     script 01: before every fit this script REPLAYS the data-generation seed
-#     (set.seed(subsample_seed); sample(1:4802, 1000), under R's
-#     sample.kind = "Rounding" as set by dgp_2016()) and, for cross-fit cells,
-#     the fold seed -- so the fit starts from exactly the RNG state the
-#     data-generation step left behind. See replay_rng_state() below.
+# Reproducibility: ranger_naimi seeds itself from a checksum of its data, HAL
+# and the parametric fits use no RNG, and the SuperLearner ensembles draw from
+# the ambient stream. Before every fit the script replays the RNG state that
+# script 01 left after drawing the dataset (subsample seed, then the fold seed
+# for cf cells), so each cell reproduces on its own.
 # =============================================================================
 
 # --- Settings ----------------------------------------------------------------
-# Command line:
 #   Rscript 02_run_nuisance_learners.R --settings 4,24 --sims 1:5
-#   Rscript 02_run_nuisance_learners.R --settings manuscript          # all 44 manuscript DGPs
+#   Rscript 02_run_nuisance_learners.R --settings manuscript
 #   Rscript 02_run_nuisance_learners.R --settings 24 --learners parametric,ranger_naimi --cross_fit true
-#   flags:  --settings <ids and/or preset names>  (REQUIRED)
-#           --learners a,b   --sims a:b|a,b,c   --cross_fit true,false
-# Interactive: edit the values below (and CONFIG_FILE further down), run top to bottom.
-# Runtime per sim (Apple Silicon, 1 thread): parametric/parametric_strat ~2 s;
-# ranger_naimi ~4 s; oracle <1 s; sl_balzer_screened ~20 s nocf / ~50 s cf;
-# sl_naimi_v1_adapt and sl_default_screened ~15-60 s nocf, several minutes cf;
-# hal_s1_d2_acic ~1-3 min nocf, ~5-15 min cf. Each (setting, sim) is
-# seed-isolated, so sharding across processes by --settings is safe.
+# --settings is required (ids and/or preset names from config.yaml); --learners,
+# --sims (a:b or a,b,c) and --cross_fit (true,false) subset the run.
+# Interactive use: edit the values below and CONFIG_FILE, then run top to bottom.
+# Rough per-sim times on one thread: parametric < 1 s; ranger ~3 s nocf, ~12 s
+# cf; SL Balzer ~15 s / ~1 min; SL Naimi and SL Default ~10 s / a few minutes;
+# HAL ~30 s / several minutes.
 
-settings  <- NULL   # REQUIRED: setting ids and/or preset names, e.g. c(4, 24) or "manuscript"
+settings  <- NULL   # required: setting ids and/or preset names, e.g. c(4, 24) or "manuscript"
 learners  <- NULL   # NULL = roster in config.yaml; otherwise e.g. c("parametric", "oracle")
 sims      <- NULL   # NULL = 1..n_sims from config.yaml; otherwise e.g. 1:5 or c(3, 7)
 cross_fit <- NULL   # NULL = both; otherwise TRUE and/or FALSE
@@ -100,16 +61,13 @@ if (length(args) > 0) {
 }
 
 # --- Config and paths --------------------------------------------------------
-# Path to this repository's config.yaml. Fine as-is when you run the script with
-# Rscript from the repository; if you run it line by line, PUT THE FULL PATH HERE
-# (e.g. "~/ACIC-plasmode-pipeline/config.yaml").
+# Relative to the repository directory; use the full path when running
+# interactively.
 CONFIG_FILE <- "config.yaml"
 CONFIG      <- yaml::read_yaml(CONFIG_FILE)
 REPO_DIR    <- dirname(CONFIG_FILE)
 
-# Expand `--settings` tokens (setting ids and/or preset names from config.yaml).
-# Script 01 owns the setting definitions; here we only need the ids, since every
-# dataset carries its own knobs and seeds.
+# Expand --settings (ids and/or preset names) into setting ids.
 resolve_settings <- function(tokens) {
   presets <- CONFIG$settings$presets
   if (is.null(tokens) || !length(tokens))
@@ -140,8 +98,7 @@ suppressPackageStartupMessages({
   library(glmnet); library(xgboost); library(tmle)  # tmle: tmle.SL.dbarts* wrappers
 })
 
-# hal9001 is attached on FIRST USE rather than at source time: it is heavy and
-# only its own learner group needs it.
+# hal9001 is attached when the HAL learner first runs.
 .require_pkg <- function(p) {
   if (!requireNamespace(p, quietly = TRUE))
     stop(sprintf(paste("package '%s' is required by this learner; install it or",
@@ -151,10 +108,8 @@ suppressPackageStartupMessages({
 }
 
 # --- learner hyper-parameters ---------------------------------------------------
-# SCREEN BUDGETS. Two families coexist and the difference is deliberate: top-10
-# where the screen exists to keep a candidate TRACTABLE (step.interaction's ~.^2
-# search, HAL's degree-2 basis) and top-20 where it exists to keep a SMOOTHER
-# well-behaved (GAM/BART).
+# Screens: top-10 where the screen keeps a candidate tractable (step.interaction,
+# HAL's degree-2 basis), top-20 where it keeps a smoother well-behaved (GAM, BART).
 CV_FOLDS       <- 5L                          # SuperLearner internal CV folds
 RANK_BALZER    <- 10L                         # step.interaction screen budget
 RANK_SLDEFAULT <- 20L                         # BART/GAM screen budget
@@ -168,13 +123,13 @@ RN_NUM_TREES   <- 500L
 
 
 # =============================================================================
-# ==== RNG replay + cross-fitting infrastructure
+# ==== RNG replay + cross-fitting
 # =============================================================================
 
-# Restore the RNG state that 01_generate_dgp_data.R left behind right after
-# drawing this dataset: dgp_2016() switched the sampler to "Rounding", then
-# set.seed(subsample_seed) + sample(1:4802, 1000) drew the analysis rows. The
-# re-drawn index must equal the cached one (a cache-integrity check as well).
+# Restore the RNG state script 01 left after drawing this dataset: dgp_2016()
+# sets sample.kind = "Rounding", then set.seed(subsample_seed) and
+# sample(1:4802, 1000) draw the analysis rows. The redrawn index must match the
+# cached one.
 replay_rng_state <- function(sim_data) {
   suppressWarnings(RNGkind(sample.kind = "Rounding"))
   set.seed(sim_data$subsample_seed)
@@ -190,8 +145,7 @@ make_folds <- function(n, K = 5, seed = NULL) {
   sample(rep(1:K, length.out = n))
 }
 
-# Generic K-fold cross-fitting: fit on folds != k, predict fold k, assemble
-# full-sample out-of-fold predictions. NOT truncated here (callers truncate).
+# K-fold cross-fitting: fit on folds != k, predict fold k. Not truncated here.
 crossfit_nuisance <- function(Y, A, X, fit_fn, K = 5, folds = NULL, seed = NULL) {
   n <- length(Y)
   if (is.null(folds)) folds <- make_folds(n, K, seed)
@@ -213,8 +167,8 @@ crossfit_nuisance <- function(Y, A, X, fit_fn, K = 5, folds = NULL, seed = NULL)
 # =============================================================================
 # ==== (1) parametric -- GLM S-learner
 # =============================================================================
-# Logistic main-effects propensity; ONE pooled Y ~ A + X gaussian GLM predicted
-# at A = 0 and A = 1 (so its implied CATE is a constant).
+# Logistic main-effects propensity; one pooled Y ~ A + X GLM predicted at A = 0
+# and A = 1.
 fit_parametric <- function(Y, A, X_num) {
   dat <- data.frame(A = A, X_num)
   ps <- suppressWarnings(glm(A ~ ., data = dat, family = binomial))
@@ -242,17 +196,14 @@ fitfn_parametric <- function(Y_train, A_train, X_train, X_test) {
 
 
 # =============================================================================
-# ==== (2) ranger_naimi -- the manuscript 'Random Forest'
+# ==== (2) ranger_naimi -- 'Random Forest'
 # =============================================================================
-# Random-forest T-learner following the Naimi et al. (2023) ranger protocol at
-# p = 80: default-rule mtry (floor(sqrt p) = 8; NOT set, so ranger's own
-# default applies -- the rule that Naimi's mtry = 2 instantiates at p = 4),
-# min.node.size CV-selected in {30, 60} per nuisance, and in-bag predict() for
-# BOTH nuisances (so the in-sample track is genuinely in-sample).
-# CONTENT-SEEDED: the node-size CV sample() and the forests would otherwise
-# couple reproducibility to loop order; seeding each fit from a checksum of its
-# own data makes it reproducible per dataset and leaves the ambient RNG stream
-# untouched for the other learners.
+# Random-forest T-learner after Naimi et al. (2023): mtry left at ranger's
+# default floor(sqrt(p)) = 8 (the rule behind Naimi's mtry = 2 at p = 4),
+# min.node.size chosen by 5-fold CV from {30, 60} per nuisance, in-bag
+# predictions for the in-sample track. Each fit is seeded from a checksum of
+# its data and restores the ambient RNG state afterwards, so results do not
+# depend on loop order.
 rn_seed <- function(Y, A, X) {
   raw <- serialize(list(as.numeric(Y), as.numeric(A), as.numeric(as.matrix(X))),
                    connection = NULL, version = 2)
@@ -271,8 +222,7 @@ rn_with_seed <- function(seed, expr) {
   expr
 }
 
-# node-size CV selector: mtry is left at ranger's default rule floor(sqrt p)
-# (Naimi pinned 2 = that rule at p=4; here the RULE gives 8).
+# min.node.size by CV; mtry stays at ranger's default.
 rn_select_node_size <- function(X_df, y, family, cv_folds = RN_CV_FOLDS,
                                 candidates = RN_NODE_GRID) {
   n <- length(y)
@@ -303,7 +253,7 @@ rn_select_node_size <- function(X_df, y, family, cv_folds = RN_CV_FOLDS,
   candidates[which.min(cv_errors)]
 }
 
-# in-sample fit: in-bag predict() for BOTH nuisances (Naimi convention)
+# in-sample fit (in-bag predictions)
 fit_nuisance_ranger_naimi <- function(Y, A, X_num, pi_bounds = PI_BOUNDS) {
   rn_with_seed(rn_seed(Y, A, X_num), {
     X_df <- as.data.frame(X_num)
@@ -322,14 +272,13 @@ fit_nuisance_ranger_naimi <- function(Y, A, X_num, pi_bounds = PI_BOUNDS) {
     Q1_fit <- ranger(y = Y[idx_1], x = X_df[idx_1, , drop = FALSE],
                      num.trees = RN_NUM_TREES, min.node.size = Q1_node, num.threads = RN_THREADS)
     mu1hat <- predict(Q1_fit, data = X_df, num.threads = RN_THREADS)$predictions
-    ## the CV-selected node sizes are returned as a diagnostic extra
+    # selected node sizes kept as a diagnostic
     list(pihat = pihat, mu0hat = mu0hat, mu1hat = mu1hat,
          nodes = c(ps = ps_node, q0 = Q0_node, q1 = Q1_node))
   })
 }
 
-# cross-fit: node CV within each training fold, held-out predictions; one
-# content seed around the WHOLE fold loop.
+# cross-fit: node-size CV inside each training fold; one seed around the fold loop.
 fit_nuisance_cf_ranger_naimi <- function(Y, A, X_num, folds, pi_bounds = PI_BOUNDS) {
   rn_with_seed(rn_seed(Y, A, X_num), {
     X_df <- as.data.frame(X_num)
@@ -364,7 +313,6 @@ fit_nuisance_cf_ranger_naimi <- function(Y, A, X_num, folds, pi_bounds = PI_BOUN
 # =============================================================================
 # ==== Shared SuperLearner internals (PS + arm-stratified outcomes)
 # =============================================================================
-# Shared internal: SuperLearner PS + arm-stratified outcome, any library.
 .fit_sl <- function(Y, A, X, ps_library, out_library, truncate_ps = TRUE) {
   X <- as.data.frame(X)
   ps_fit <- SuperLearner(Y = A, X = X, family = binomial(),
@@ -404,36 +352,27 @@ fit_nuisance_cf_ranger_naimi <- function(Y, A, X_num, folds, pi_bounds = PI_BOUN
 
 
 # =============================================================================
-# ==== (3) sl_naimi_v1_adapt -- the manuscript 'SL Naimi'
+# ==== (3) sl_naimi_v1_adapt -- 'SL Naimi'
 # =============================================================================
-# The Naimi et al. (2023) SuperLearner ported to p = 80 with exactly TWO
-# adaptations, everything else identical to the p = 4 original:
-#   1. RF candidates: mtry deliberately NOT set, so SL.ranger's default rule
-#      floor(sqrt(p)) = 8 applies (the rule Naimi's frozen mtry = 2 instantiates
-#      at p = 4). num.trees = 500, min.node.size {30, 60} unchanged.
-#   2. GAM candidates: screened to their top-RANK_ADAPT covariates by
-#      screen.corRank (20) -- the same screener + budget sl_default_screened
-#      uses for its GAM. Screening is response-specific automatically
-#      (list-form library).
-# Unchanged: XGB candidates (500 trees, depth 4, eta .1, minobspernode
-# {30, 60}), GLM-free library, NNLS metalearner, V = 5 internal CV,
-# arm-stratified outcomes, [0.025, 0.975] truncation.
-# create.Learner() prefixes are RFA/XGBA/GAMA.
-# =============================================================================
+# The Naimi et al. (2023) SuperLearner at p = 80 with two changes: mtry is
+# left at SL.ranger's default floor(sqrt(p)) = 8 rather than fixed at 2, and
+# the GAM candidates are screened to their top-20 covariates by screen.corRank.
+# Everything else is as in the original: RF (500 trees, min.node.size 30/60),
+# XGBoost (500 trees, depth 4, eta 0.1, minobspernode 30/60), GAM (df 3-8),
+# NNLS metalearner, 5-fold internal CV, arm-stratified outcomes.
 RANK_ADAPT     <- 20L
 ADAPT_CV_FOLDS <- 5
 
-# Global so SuperLearner's get() finds it by name (SL runs sequentially).
+# Screeners must be global functions so SuperLearner can find them by name.
 screen.corRank.adapt <- function(Y, X, family, rank = RANK_ADAPT, ...)
   SuperLearner::screen.corRank(Y = Y, X = X, family = family, rank = rank)
 
-# Build (once per session) the tuned wrappers and return the LIST-form library:
-# RF/XGB candidates see all 80 columns; GAM candidates get the corRank screen.
+# Build the tuned wrappers once per session; RF/XGB see all columns, GAM is screened.
 create_adapt_library <- function() {
   if (!exists("SL_ADAPT_CREATED", envir = .GlobalEnv)) {
     rf_learner <- create.Learner("SL.ranger",
-      params = list(num.trees = 500),          # mtry deliberately NOT set ->
-      tune = list(min.node.size = c(30, 60)),  # SL.ranger default floor(sqrt(p))
+      params = list(num.trees = 500),          # mtry left at SL.ranger's default
+      tune = list(min.node.size = c(30, 60)),
       name_prefix = "RFA", env = .GlobalEnv)
     xgb_learner <- create.Learner("SL.xgboost",
       params = list(ntrees = 500, max_depth = 4, shrinkage = 0.1),
@@ -479,8 +418,7 @@ fit_nuisance_sl_naimi_v1_adapt <- function(Y, A, X, cv_folds = ADAPT_CV_FOLDS,
        mu1hat = as.numeric(Q1_fit$SL.predict))
 }
 
-# --- cross-fit interface: fit on fold-training set, predict held-out fold -----
-# (raw pihat; the CF runner truncates after assembling out-of-fold predictions)
+# --- cross-fit: fit on the training folds, predict the held-out fold ---------
 fit_sl_naimi_v1_adapt_fn <- function(Y_train, A_train, X_train, X_test) {
   lib <- create_adapt_library()
   X_train_df <- as.data.frame(X_train)
@@ -504,12 +442,10 @@ fit_sl_naimi_v1_adapt_fn <- function(Y_train, A_train, X_train, X_test) {
 
 
 # =============================================================================
-# ==== (4) sl_balzer_screened -- the manuscript 'SL Balzer'
+# ==== (4) sl_balzer_screened -- 'SL Balzer'
 # =============================================================================
-# The Balzer & Westling (2023) library with the real step.interaction
-# candidate, screened to the top-RANK_BALZER covariates by |corr| so its ~.^2
-# search stays tractable at p = 80. The screener must be a GLOBAL function so
-# SuperLearner's get() finds it by name.
+# The Balzer & Westling (2023) library; step.interaction is screened to the
+# top-10 covariates so its ~.^2 search stays tractable at p = 80.
 screen.corRank.balzer <- function(Y, X, family, rank = RANK_BALZER, ...)
   SuperLearner::screen.corRank(Y = Y, X = X, family = family, rank = rank)
 
@@ -525,13 +461,11 @@ fitfn_sl_balzer_screened <- function(Y_train, A_train, X_train, X_test)
 
 
 # =============================================================================
-# ==== (5) sl_default_screened -- the manuscript 'SL Default'
+# ==== (5) sl_default_screened -- 'SL Default'
 # =============================================================================
-# The tmle-package default SuperLearner libraries, with the two smoothers
-# (BART, GAM) screened to the top-RANK_SLDEFAULT covariates (unscreened SL.gam
-# does not run reliably on this rank-deficient 80-column design). Screening is
-# response-specific automatically: screen.corRank keys on the response each
-# SuperLearner() call passes (A for the PS, Y for the outcome arms).
+# The tmle package's default SuperLearner libraries, with BART and GAM screened
+# to the top-20 covariates (unscreened SL.gam fails on this rank-deficient
+# design).
 screen.corRank.sldef <- function(Y, X, family, rank = RANK_SLDEFAULT, ...)
   SuperLearner::screen.corRank(Y = Y, X = X, family = family, rank = rank)
 
@@ -550,19 +484,12 @@ fitfn_sl_default_screened <- function(Y_train, A_train, X_train, X_test)
 
 
 # =============================================================================
-# ==== (6) parametric_strat -- arm-stratified parametric (CATE displays)
+# ==== (6) parametric_strat -- arm-stratified parametric (CATE)
 # =============================================================================
-# Identical logistic main-effects propensity to `parametric` (section 1), but
-# the outcome GLM is fit SEPARATELY on the A==0 and A==1 rows -- algebraically
-# a pooled OLS with full A x X interactions, i.e. the parametric T-learner. The
-# paired parametric-vs-parametric_strat contrast therefore isolates one axis:
-# S-learner vs T-learner outcome architecture (any PS-only estimator is
-# identical between them). This is the "Parametric" of every CATE/PEHE display
-# (the pooled learner's tau-hat is a constant, so its PEHE equals sd(tau_true)
-# by construction); ATE/ATT displays keep the pooled `parametric`.
-# Deterministic (no RNG). Within-arm rank deficiency is expected on the
-# 80-column design (5 exactly-redundant columns) -- glm() drops aliased columns
-# and predict() warns; warnings are suppressed exactly as in the pooled learner.
+# Same propensity model as `parametric`; the outcome GLM is fit separately on
+# the A == 0 and A == 1 rows (the parametric T-learner). The design has a few
+# aliased columns within arm, which glm() drops; the resulting warnings are
+# suppressed as in the pooled learner.
 fit_parametric_strat <- function(Y, A, X_num, pi_bounds = PI_BOUNDS) {
   X_df <- as.data.frame(X_num)
   dat  <- data.frame(A = A, X_df)
@@ -598,30 +525,13 @@ fit_parametric_strat_fn <- function(Y_train, A_train, X_train, X_test) {
 
 
 # =============================================================================
-# ==== (7) hal_s1_d2_acic -- the manuscript 'HAL'
+# ==== (7) hal_s1_d2_acic -- 'HAL'
 # =============================================================================
-# ONE fixed Highly Adaptive Lasso configuration (not a discrete SuperLearner
-# over configurations):
-#   smoothness_orders = 1     first-order (piecewise-linear) spline basis
-#   max_degree        = 2     main terms + all two-way interactions
-#   num_knots         = c(25, 10)   explicit per-degree basis budget, tighter
-#                             than hal9001's s=1 default c(50, 25)
-#   lasso CV          = 5 folds with a DETERMINISTIC systematic foldid
-#                             (overrides fit_hal's default 10-fold cv.glmnet)
-#   screen            = response-specific corRank top-HAL_RANK (= 10)
-# TWO basis-control levers combined -- the covariate screen AND the num_knots
-# budget -- so the degree-2 basis over 10 screened columns stays small and
-# well-conditioned. reduce_basis is NOT used (hal9001 ignores it for
-# smoothness_orders != 0 anyway). The screen is top-TEN (a tractability screen,
-# like sl_balzer_screened's) rather than the top-20 smoother screen of
-# sl_default_screened. NOTE this is a different HAL configuration from the
-# companion simulation (1)'s discrete-SL HAL.
-#
-# DETERMINISTIC: corRank, the systematic foldid and fit_hal consume no ambient
-# RNG, so HAL reproduces per dataset regardless of loop order. Exact
-# reproduction does require the same hal9001 VERSION (0.4.6 for the reported
-# numbers) -- the basis enumeration is version-dependent in a way seeds cannot
-# rescue.
+# One fixed highly adaptive lasso: smoothness_orders = 1, max_degree = 2,
+# num_knots = c(25, 10), 5-fold lasso CV with a systematic foldid, and a
+# corRank top-10 screen so the degree-2 basis stays small. No RNG is used, but
+# the basis enumeration depends on the hal9001 version (0.4.6 here). This is
+# a different configuration from the discrete-SL HAL of simulation (1).
 HAL_S1D2_MAXDEG   <- 2
 HAL_S1D2_SMOOTH   <- 1
 HAL_S1D2_NUMKNOTS <- c(25, 10)
@@ -636,8 +546,7 @@ hal_s1d2_scr_cols <- function(y, Xtr, family, rank) {
   if (length(w) == 0) seq_len(ncol(Xtr)) else w
 }
 
-# Deterministic 5-fold lasso CV: systematic foldid (1,2,3,4,5,1,...) over the
-# (already randomly-ordered) rows -> balanced, reproducible, no RNG.
+# 5-fold lasso CV with a systematic foldid (1,2,3,4,5,1,...).
 .hal_s1d2_foldid <- function(n) rep_len(seq_len(HAL_S1D2_CVFOLDS), n)
 
 .fit_hal_s1_d2 <- function(X_mat, Y_vec, family_str) {
@@ -648,9 +557,7 @@ hal_s1d2_scr_cols <- function(y, Xtr, family, rank) {
           fit_control = list(foldid = .hal_s1d2_foldid(length(Y_vec))))
 }
 
-# Screen (fit rows) -> HAL fit (fit rows, screened cols) -> predict (eval rows).
-# Screen col subset learned on (ytr, Xtr) and applied to Xeval -> no leakage.
-# type="response" for both families (gaussian: response == fitted mean).
+# Screen and fit on the training rows, predict the evaluation rows.
 hal_s1d2_fit_one <- function(ytr, Xtr, Xeval, family_str, rank) {
   fam_obj <- if (family_str == "binomial") binomial() else gaussian()
   cols <- hal_s1d2_scr_cols(ytr, Xtr, fam_obj, rank)
@@ -670,8 +577,8 @@ fit_nuisance_hal_s1_d2_acic <- function(Y, A, Xm, rank = HAL_RANK,
   list(pihat = pihat, mu0hat = mu0, mu1hat = mu1)
 }
 
-# CF: re-screened and refit inside every outer fold's training rows, predicted
-# on the held-out fold. Returns a fit_fn for crossfit_nuisance().
+# cross-fit: screen and fit inside each training fold; returns a fit_fn for
+# crossfit_nuisance().
 make_hal_s1_d2_acic_cf_fn <- function(rank = HAL_RANK) {
   .require_pkg("hal9001")
   function(Y_train, A_train, X_train, X_test) {
@@ -687,13 +594,10 @@ make_hal_s1_d2_acic_cf_fn <- function(rank = HAL_RANK) {
 
 
 # =============================================================================
-# ==== (8) oracle -- plug-in truth reference arm
+# ==== (8) oracle -- true nuisances
 # =============================================================================
-# No fitting happens: the DGP draw's own true propensity (truncated to
-# PI_BOUNDS, like every estimated learner) and true conditional-mean surfaces
-# are plugged in. Purpose: performance ceiling -- if the oracle fails a metric,
-# the failure belongs to the estimator/regime, not to nuisance estimation.
-# No cross-fit arm exists: the oracle estimates nothing.
+# The DGP's own propensity (truncated like the estimated ones) and conditional
+# means; nothing is fit, so there is no cross-fit arm.
 fit_oracle <- function(dat)
   list(pihat  = pmax(PI_BOUNDS[1], pmin(PI_BOUNDS[2], dat$e_true)),
        mu0hat = dat$mu0, mu1hat = dat$mu1)
@@ -794,9 +698,8 @@ for (setting_id in settings) {
         if (is.null(nuisance)) next
         el <- proc.time() - pt
 
-        # Truncate once here (the in-sample fits already truncate internally;
-        # cross-fit vectors are assembled raw). Script 03 re-applies the same
-        # bounds on read, so a raw-vector track (e.g. TabPFN) is handled identically.
+        # Truncate here (in-sample fits already do; cross-fit vectors are raw).
+        # Script 03 applies the same bounds again on read.
         out <- list(
           pihat  = pmax(PI_BOUNDS[1], pmin(PI_BOUNDS[2], as.numeric(nuisance$pihat))),
           mu0hat = as.numeric(nuisance$mu0hat),

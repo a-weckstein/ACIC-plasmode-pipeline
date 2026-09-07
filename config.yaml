@@ -12,63 +12,34 @@ dgp:
   n_population: 4802        # fixed real covariate matrix aciccomp2016::input_2016 (4,802 x 58)
   n_sample: 1000            # analysis subsample per replicate, drawn without replacement
   n_sims: 50                # Monte Carlo replicates per DGP setting
-  # Seed protocol -- every random draw is deterministic in (acic_id, sim_id), so
-  # every learner sees the IDENTICAL dataset and folds (paired comparisons):
-  #   surfaces, A, Y : dgp_2016(x, acic_id, sim_id) for numbered ACIC settings
-  #                    (the package's curated seed table); custom settings pass
-  #                    their knob list with sim_id as the seed
-  #   n=1000 subsample : set.seed(subsample_seed) right after dgp_2016();
-  #                    "legacy"     = sim_id*100 + acic_id
-  #                    "namespaced" = 500000 + sim_id*1000 + acic_id
-  #   cross-fit folds : set.seed(sim_id*1000 + acic_id)
-  # NOTE dgp_2016() switches R's sampler to sample.kind = "Rounding" for the
-  # session; scripts 01 and 02 rely on that (see their headers).
+  # Seeds (see the header of 01_generate_dgp_data.R): subsample seed
+  # "legacy" = sim_id*100 + id, "namespaced" = 500000 + sim_id*1000 + id;
+  # fold seed = sim_id*1000 + id.
   subsample_seed_legacy_multiplier: 100
   subsample_seed_namespaced_offset: 500000
   subsample_seed_namespaced_multiplier: 1000
   fold_seed_multiplier: 1000
 
 # --- DGP settings -------------------------------------------------------------
-# There is no fixed grid: you choose what to run with `--settings`. A setting is
-# EITHER a built-in ACIC row OR a custom knob combination, and is addressed by a
-# numeric id.
-#
-#   BUILT-IN  id 1-77   the knobs of aciccomp2016::parameters_2016[id, ]. Uses
-#                       dgp_2016's curated random-seed table, which holds 100
-#                       seeds per setting -- so sim ids must be 1-100.
-#   CUSTOM    id >= 100 defined under `custom:` below (or passed at run time with
-#                       --knobs/--label; see 01_generate_dgp_data.R). The knob
-#                       list is handed to dgp_2016() with sim_id as the seed, so
-#                       there is no limit on the number of replicates.
-#
-# Accepted knob values (aciccomp2016). NOTE dgp_2016() does NOT validate
-# `overlap.trt` or `te.hetero`: an unrecognised value is silently treated as
-# one-term / none. Script 01 therefore rejects anything not listed here.
+# A setting is a built-in ACIC row (id 1-77, knobs from
+# aciccomp2016::parameters_2016; the package seed table allows sims 1-100) or a
+# custom knob combination (id >= 100, defined under `custom:` or passed to
+# script 01 with --knobs). Knob values:
 #   model.trt    linear | polynomial | step | interaction | pure.polynomial
-#   root.trt     treatment prevalence, in (0, 1)   [competition grid: 0.35, 0.65]
-#   overlap.trt  full | one-term | two-term        (one-term = partial overlap,
-#                                                   induced for the untreated only)
+#   root.trt     treatment prevalence in (0, 1)      [competition grid: 0.35, 0.65]
+#   overlap.trt  full | one-term | two-term          (one-term = partial overlap)
 #   model.rsp    linear | exponential | step | polynomial | interaction | pure.polynomial
-#   alignment    0 to 1                            [competition grid: 0, 0.25, 0.75]
+#   alignment    0 to 1                              [competition grid: 0, 0.25, 0.75]
 #   te.hetero    none | med | high
-#
-# Subsample-seed scheme (for the n=1,000 draw; built-in settings always use
-# `legacy`):
-#   legacy       sim_id * 100 + id
-#   namespaced   500000 + sim_id * 1000 + id     (disjoint from the legacy space)
-# Use `legacy` for a custom setting deliberately MATCHED to a built-in one: with
-# it, custom id 1xx at sim k draws the SAME n=1,000 rows as built-in setting
-# (id - 100) at sim k+1, because k*100 + (id) == (k+1)*100 + (id - 100). That is
-# what makes the manuscript's overlap contrasts paired on covariates. Use
-# `namespaced` for a custom setting with no built-in counterpart (independent
-# draws).
+# seed_scheme for a custom setting: "namespaced" (independent subsample) or
+# "legacy", under which custom id 1xx at sim k draws the same rows as built-in
+# id - 100 at sim k + 1 (used to pair the full-overlap twins with their
+# one-term originals).
 settings:
 
   # --- custom settings ---------------------------------------------------------
-  # The manuscript's 11 custom DGPs. 1xx = the full-overlap twin of built-in
-  # setting (id - 100): identical knobs except overlap.trt (one-term -> full).
-  # 2xx = knob combinations with no built-in counterpart. Add your own here with
-  # an unused id (>= 100), a label, the six knobs and a seed scheme.
+  # The manuscript's 11 custom DGPs: 1xx = full-overlap twin of built-in id - 100,
+  # 2xx = combinations with no built-in counterpart.
   custom:
     - {id: 101, label: "DGP 01 (custom): full-overlap twin of ACIC 1",   model.trt: linear,     root.trt: 0.35, overlap.trt: full, model.rsp: linear,      alignment: 0.75, te.hetero: high, seed_scheme: legacy}
     - {id: 105, label: "DGP 02 (custom): full-overlap twin of ACIC 5",   model.trt: linear,     root.trt: 0.35, overlap.trt: full, model.rsp: exponential, alignment: 0.75, te.hetero: high, seed_scheme: legacy}
@@ -82,9 +53,7 @@ settings:
     - {id: 207, label: "DGP 08 (custom): step PS / linear outcome, low alignment",  model.trt: step,   root.trt: 0.35, overlap.trt: full, model.rsp: linear, alignment: 0.25, te.hetero: med,  seed_scheme: namespaced}
     - {id: 203, label: "DGP 35 (custom): step PS / exponential outcome, no heterogeneity", model.trt: step, root.trt: 0.35, overlap.trt: full, model.rsp: exponential, alignment: 0.75, te.hetero: none, seed_scheme: namespaced}
 
-  # --- display labels for built-in settings ------------------------------------
-  # Optional; a built-in setting with no entry is labelled "ACIC <id>". These are
-  # the manuscript's Table S2 DGP numbers.
+  # --- labels for built-in settings (manuscript Table S2 numbers; optional) -----
   labels:
     4:  "DGP 09 (ACIC 4)"
     28: "DGP 10 (ACIC 28)"
@@ -120,11 +89,9 @@ settings:
     24: "DGP 43 (ACIC 24)"
     54: "DGP 44 (ACIC 54)"
 
-  # --- named id lists ----------------------------------------------------------
-  # `--settings <name>` expands a preset; ids and preset names can be mixed,
-  # e.g. `--settings manuscript_full_overlap,24`.
+  # --- presets (`--settings <name>`; names and ids can be mixed) -----------------
   presets:
-    # the manuscript's 44 DGPs, in Table S2 order (DGP 1-44)
+    # the manuscript's 44 DGPs in Table S2 order
     manuscript: [101, 105, 106, 113, 204, 205, 206, 207,
                  4, 28, 29, 30, 32, 33, 41, 42, 43, 45, 46, 47,
                  56, 57, 58, 60, 61, 62, 71, 72, 73, 75, 76, 77,
@@ -137,7 +104,7 @@ settings:
                               103, 102, 203]
     # the 9 one-term (partial overlap) DGPs; the ATT is still identified
     manuscript_one_term: [2, 3, 5, 6, 7, 8, 9, 24, 54]
-    # a cheap two-setting slice for smoke tests (one full overlap, one one-term)
+    # two settings for smoke tests
     demo: [4, 24]
 
 # --- Estimation settings ------------------------------------------------------
@@ -148,16 +115,12 @@ estimation:
   # The estimators (TMLE, AIPW, Hajek IPW, G-computation, each for the ATE and
   # the ATT) are fixed in 03_run_ate_estimators.R.
 
-# --- Nuisance learners (manuscript roster; store keys) --------------------------
-#   parametric           "Parametric"  (ATE/ATT displays; pooled Y ~ A + X outcome model)
-#   parametric_strat     "Parametric"  (CATE/PEHE displays; arm-stratified T-learner)
-#   ranger_naimi         "Random Forest"
-#   sl_naimi_v1_adapt    "SL Naimi"
-#   sl_balzer_screened   "SL Balzer"
-#   sl_default_screened  "SL Default"
-#   hal_s1_d2_acic       "HAL"
-#   oracle               true nuisances (no cross-fit arm)
-# TabPFN v3 (cloud API) is documented in the README and is not part of this code.
+# --- Nuisance learners (key: manuscript name) -----------------------------------
+#   parametric "Parametric" (ATE/ATT), parametric_strat "Parametric" (CATE),
+#   ranger_naimi "Random Forest", sl_naimi_v1_adapt "SL Naimi",
+#   sl_balzer_screened "SL Balzer", sl_default_screened "SL Default",
+#   hal_s1_d2_acic "HAL", oracle (true nuisances, no cross-fit arm).
+#   TabPFN v3 is described in the README and is not part of this code.
 learners:
   - parametric
   - parametric_strat
@@ -170,9 +133,7 @@ learners:
 
 # --- Evaluation (script 04) ---------------------------------------------------
 evaluation:
-  # ATE and CATE are evaluated on full-overlap settings only (identifiability);
-  # the ATT is identified in every setting (non-positivity affects the untreated
-  # only). PEHE is reported for cross-fit nuisances only.
+  # ATE and CATE on full-overlap settings only; ATT on all; PEHE cross-fit only
   ate_settings: full_overlap
   att_settings: all
   pehe_settings: full_overlap

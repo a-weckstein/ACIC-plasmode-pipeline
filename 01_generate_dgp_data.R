@@ -1,49 +1,39 @@
 # =============================================================================
-# 01_generate_dgp_data.R — generate + cache the simulated datasets (Simulation 2)
+# 01_generate_dgp_data.R — generate and cache the simulated datasets (Simulation 2)
 #
-# ACIC 2016 plasmode DGPs (Dorie et al. 2019) via aciccomp2016::dgp_2016():
-# the REAL 4,802 x 58 covariate matrix (Collaborative Perinatal Project) with
-# SYNTHETIC treatment and outcome surfaces drawn from six knobs (model.trt,
-# root.trt, overlap.trt, model.rsp, alignment, te.hetero). The surfaces are
-# redrawn on every (setting, sim) call -- a "setting" is a distribution over
-# DGPs, so the ground truth varies across replicates.
-# One replicate = one surface draw on all 4,802 units + one n=1000 subsample
-# drawn without replacement (the analysis sample).
+# ACIC 2016 DGPs (Dorie et al. 2019) via aciccomp2016::dgp_2016(): the real
+# 4,802 x 58 covariate matrix with synthetic treatment and outcome surfaces
+# drawn from six knobs (model.trt, root.trt, overlap.trt, model.rsp, alignment,
+# te.hetero). The surfaces are redrawn on every (setting, sim), so the ground
+# truth varies across replicates. One replicate = one surface draw on all
+# 4,802 units plus an n = 1000 subsample without replacement.
 #
-# WHICH DGPs GET SIMULATED IS ENTIRELY UP TO YOU: name built-in ACIC settings
-# by id, and/or define custom knob combinations (see --settings / --knobs
-# below). config.yaml ships the manuscript's 44 DGPs as presets.
+# Settings are chosen with --settings: built-in ACIC ids and/or custom knob
+# combinations (see below); config.yaml ships the manuscript's 44 DGPs as presets.
 #
-# Writes (per setting x sim):
-#   _data_inputs/setting_<id>/sim_XXXX.rds      dataset incl. ground truth (R track)
-#   _data_processed/setting_<id>/sim_XXXX.csv   (--export_csv TRUE only) the raw
-#                                               58 covariates, A, Y and the shared
-#                                               cross-fitting fold_id (for a
+# Writes, per setting x sim:
+#   _data_inputs/setting_<id>/sim_XXXX.rds      dataset with ground truth and folds
+#   _data_processed/setting_<id>/sim_XXXX.csv   with --export_csv TRUE: raw
+#                                               covariates, A, Y, fold_id (for a
 #                                               Python / TabPFN track)
-# Idempotent: an existing sim is validated against the setting definition (id,
-# knobs, seed, n) and reused, never silently rewritten.
+# An existing sim is checked against the setting definition and reused.
 # =============================================================================
 
 # --- Settings ----------------------------------------------------------------
-# `--settings` is REQUIRED: there is no default grid. It takes setting ids and/or
-# preset names from config.yaml (mixed freely), e.g.
 #   Rscript 01_generate_dgp_data.R --settings 4,24 --sims 1:5
-#   Rscript 01_generate_dgp_data.R --settings manuscript              # all 44 manuscript DGPs
+#   Rscript 01_generate_dgp_data.R --settings manuscript
 #   Rscript 01_generate_dgp_data.R --settings manuscript_full_overlap,54
-#   Rscript 01_generate_dgp_data.R --settings 4 --export_csv TRUE     # + CSV for a Python track
-#
-# Setting ids 1-77 are the built-in ACIC rows (knobs of aciccomp2016::parameters_2016[id, ]).
-# Define a custom setting (id >= 100) by giving its six knob values:
+#   Rscript 01_generate_dgp_data.R --settings 4 --export_csv TRUE
+# --settings is required: ids 1-77 are the built-in ACIC rows
+# (aciccomp2016::parameters_2016[id, ]); ids >= 100 are custom settings defined
+# in config.yaml or given once on the command line:
 #   Rscript 01_generate_dgp_data.R --settings 301 --sims 1:5 \
 #     --knobs "model.trt=step,root.trt=0.5,overlap.trt=full,model.rsp=linear,alignment=0.5,te.hetero=high" \
 #     --label "step PS / linear outcome, balanced" --seed_scheme namespaced
-# `--knobs` applies to exactly one id and is refused if config.yaml defines that id
-# with different knobs. Cached datasets record their knobs and are re-checked on
-# every run, so an id can never silently change meaning.
-#
-# Interactive: edit the values below (and CONFIG_FILE further down), run top to bottom.
+# --knobs is refused if config.yaml already defines that id with other knobs.
+# Interactive use: edit the values below and CONFIG_FILE, then run top to bottom.
 
-settings    <- NULL    # REQUIRED: ids and/or preset names, e.g. c(4, 24) or "manuscript"
+settings    <- NULL    # required: ids and/or preset names, e.g. c(4, 24) or "manuscript"
 sims        <- NULL    # NULL = 1..n_sims from config.yaml; otherwise e.g. 1:5 or c(3, 7)
 export_csv  <- FALSE   # TRUE also writes the CSV export (Python / TabPFN track)
 knobs       <- NULL    # custom setting only: named list of the six knobs
@@ -76,9 +66,8 @@ if (length(args) > 0) {
 }
 
 # --- Config and paths --------------------------------------------------------
-# Path to this repository's config.yaml. Fine as-is when you run the script with
-# Rscript from the repository; if you run it line by line, PUT THE FULL PATH HERE
-# (e.g. "~/ACIC-plasmode-pipeline/config.yaml").
+# Relative to the repository directory; use the full path when running
+# interactively.
 CONFIG_FILE <- "config.yaml"
 CONFIG      <- yaml::read_yaml(CONFIG_FILE)
 REPO_DIR    <- dirname(CONFIG_FILE)
@@ -98,8 +87,8 @@ KNOB_COLS  <- c("model.trt", "root.trt", "overlap.trt", "model.rsp", "alignment"
 N_BUILTIN  <- nrow(aciccomp2016::parameters_2016)   # 77 built-in settings
 MAX_BUILTIN_SIMS <- 100L                            # depth of dgp_2016's curated seed table
 
-# Values dgp_2016() understands. It silently treats an unrecognised overlap.trt as
-# one-term and an unrecognised te.hetero as none, so they are checked here.
+# dgp_2016() does not validate overlap.trt or te.hetero (unknown values fall
+# through to one-term / none), so knob values are checked here.
 KNOB_VALUES <- list(
   model.trt   = c("linear", "polynomial", "step", "interaction", "pure.polynomial"),
   overlap.trt = c("full", "one-term", "two-term"),
@@ -114,7 +103,7 @@ CUSTOM <- {
 LABELS  <- CONFIG$settings$labels
 PRESETS <- CONFIG$settings$presets
 
-#' Expand `--settings` tokens (ids and/or preset names) into a vector of ids.
+# Expand --settings (ids and/or preset names) into setting ids.
 resolve_settings <- function(tokens) {
   if (is.null(tokens) || !length(tokens))
     stop("--settings is required: give setting ids and/or preset names.\n",
@@ -131,7 +120,7 @@ resolve_settings <- function(tokens) {
   unique(ids)
 }
 
-#' Check a knob list: names present, values understood, numerics in range.
+# Check a knob list: names present, values understood, numerics in range.
 validate_knobs <- function(k, what) {
   miss <- setdiff(KNOB_COLS, names(k))
   if (length(miss)) stop(what, " is missing knob(s): ", paste(miss, collapse = ", "), call. = FALSE)
@@ -149,8 +138,7 @@ validate_knobs <- function(k, what) {
   k[KNOB_COLS]
 }
 
-#' Everything the pipeline needs about one setting id.
-#' Returns list(id, label, builtin, seed_scheme, knobs = one-row data.frame).
+# Resolve one setting id to list(id, label, builtin, seed_scheme, knobs).
 resolve_setting <- function(id) {
   id  <- as.integer(id)
   key <- as.character(id)
@@ -230,23 +218,17 @@ export_dir <- file.path(REPO_DIR, CONFIG$paths$data_processed)
 
 
 # =============================================================================
-# ==== Seed protocol (everything deterministic in (setting_id, sim_id))
+# ==== Seed protocol (everything is deterministic in (setting_id, sim_id))
 # =============================================================================
-# surfaces, A, Y   built-in ids: dgp_2016(x, id, sim_id) indexes the package's
-#                  curated seed table; custom ids pass the knob list with sim_id
-#                  as the seed.
-# n=1000 subsample set.seed(subsample_seed) IMMEDIATELY AFTER dgp_2016(), then
-#                  sample(1:4802, 1000). Scheme per setting: "legacy" (built-ins
-#                  and matched custom twins) or "namespaced" (independent
-#                  customs; disjoint from the legacy and fold-seed spaces).
-# cross-fit folds  set.seed(fold_seed), then a balanced 5-fold assignment; the
-#                  same folds are used by every learner within a sim (script 02
-#                  re-derives them from the same seed and checks equality).
-#
-# dgp_2016() switches R's sampler to the pre-3.6.0 sample.kind = "Rounding"
-# for the rest of the session, so the subsample seed MUST be set after the
-# dgp_2016() call (as below) for sample() to reproduce the archived draws.
-# Reordering those two lines silently changes every subsample.
+# surfaces, A, Y   built-in ids: dgp_2016(x, id, sim_id) uses the package's seed
+#                  table; custom ids pass the knob list with sim_id as the seed
+# subsample        set.seed(subsample_seed) right after dgp_2016(), then
+#                  sample(1:4802, 1000); "legacy" = sim*100 + id (built-ins and
+#                  matched custom twins), "namespaced" = 500000 + sim*1000 + id
+# folds            set.seed(sim*1000 + id), balanced 5-fold assignment; script 02
+#                  re-derives and checks them
+# dgp_2016() sets sample.kind = "Rounding" for the session, so the subsample seed
+# has to be set after the dgp_2016() call.
 
 subsample_seed <- function(sim_id, setting_id) {
   if (SETTING_DEFS[[as.character(setting_id)]]$seed_scheme == "namespaced")
@@ -259,8 +241,7 @@ subsample_seed <- function(sim_id, setting_id) {
 fold_seed <- function(sim_id, setting_id)
   as.integer(sim_id) * CONFIG$dgp$fold_seed_multiplier + as.integer(setting_id)
 
-# K balanced folds; deterministic given (n, K, seed). Identical definition in
-# 02_run_nuisance_learners.R.
+# K balanced folds (same definition in script 02).
 make_folds <- function(n, K = 5, seed = NULL) {
   if (!is.null(seed)) set.seed(seed)
   sample(rep(1:K, length.out = n))
@@ -271,29 +252,23 @@ make_folds <- function(n, K = 5, seed = NULL) {
 # ==== DGP dispatch
 # =============================================================================
 
-# Built-in ids use dgp_2016's curated-seed path (byte-identical to a bare
-# dgp_2016(x, id, sim) call); custom ids pass the knob list.
+# Built-in ids use dgp_2016's own seed table; custom ids pass the knob list.
 acic_dgp <- function(x, def, sim_id) {
   if (def$builtin) aciccomp2016::dgp_2016(x, def$id, sim_id)
   else             aciccomp2016::dgp_2016(x, as.list(def$knobs), sim_id)
 }
 
-#' Draw ONE complete simulated dataset for (setting, sim).
-#' Returns everything a learner / estimator / grader needs:
-#'   X            n x 80 numeric design (58 covariates, categoricals expanded by
-#'                model.matrix(~ . - 1)); treatment/outcome are NOT columns
-#'   X_raw        the 58 raw covariates (data.frame) for the CSV export
-#'   A, Y         treatment and observed outcome on the subsample
-#'   mu0, mu1     true conditional means E[Y|A=a, X] (oracle plug-in)
-#'   e_true       true propensity (that draw's surface)
-#'   tau_true     per-unit CATE mu1 - mu0 (conditional-mean scale, NOT y1 - y0)
-#'   true_ate / true_satt          sample truths: mean(tau), mean(tau | A=1)
-#'   true_ate_pop / true_satt_pop  the same means over all 4,802 rows
-#'   fold_id      the shared cross-fitting fold assignment
+# One simulated dataset for (setting, sim):
+#   X          n x 80 numeric design (model.matrix on the 58 covariates)
+#   X_raw      the 58 raw covariates, for the CSV export
+#   A, Y       treatment and outcome on the subsample
+#   mu0, mu1, e_true, tau_true   true conditional means, propensity and CATE
+#   true_ate / true_satt         sample truths; *_pop = over all 4,802 rows
+#   fold_id    cross-fitting fold assignment
 draw_sim_data <- function(X_full, def, sim_id) {
-  sim <- acic_dgp(X_full, def, sim_id)               # also sets sample.kind = "Rounding"
+  sim <- acic_dgp(X_full, def, sim_id)               # sets sample.kind = "Rounding"
   seed_sub <- subsample_seed(sim_id, def$id)
-  set.seed(seed_sub)                                 # ORDER IS LOAD-BEARING (see header)
+  set.seed(seed_sub)                                 # after dgp_2016(); see header
   idx <- sample(1:nrow(X_full), N_SUB)
   X_sub <- X_full[idx, ]
   A <- sim$z[idx]; Y <- sim$y[idx]
@@ -339,8 +314,7 @@ for (def in SETTING_DEFS) {
 
     if (file.exists(rds_file)) {
       sim_data <- readRDS(rds_file)
-      # A cached dataset must match the setting it is being reused for -- in
-      # particular its KNOBS, so a setting id can never silently change meaning.
+      # a cached dataset must match the setting definition it is reused for
       same_knobs <- identical(lapply(sim_data$knobs[KNOB_COLS], as.character),
                               lapply(def$knobs[KNOB_COLS], as.character))
       if (!isTRUE(sim_data$setting_id == def$id) || !isTRUE(sim_data$sim_id == sim_id) ||

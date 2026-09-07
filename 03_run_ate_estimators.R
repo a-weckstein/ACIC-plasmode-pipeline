@@ -2,34 +2,25 @@
 # 03_run_ate_estimators.R — TMLE / AIPW / IPW / G-computation for the ATE and
 # the ATT on the saved nuisance fits, plus the T-learner CATE (Simulation 2)
 #
-# For every (setting x learner x cross-fit x sim) cell with a saved nuisance
-# file (from 02_run_nuisance_learners.R): truncate pihat to pi_bounds and run
-# the estimators on the same (pihat, mu0hat, mu1hat) vectors. Each estimate is
-# graded against the truth of ITS OWN estimand and replicate:
-#   bias         estimate - SAMPLE truth (mean effect on the analysed n=1000 draw)
-#   covered_pop  95% CI covers the POPULATION truth (same estimand over all
-#                4,802 rows of that replicate). The influence-function SEs
-#                target a population-scale parameter, so coverage and SE
-#                calibration are graded against the population truth, while
-#                bias/RMSE use the sample truth (manuscript Suppl. S1).
-#   pehe_t       T-learner CATE error sqrt(mean((mu1hat - mu0hat - tau_true)^2))
-#                (a learner property; recorded on the ATE rows)
-#
-# Writes one CSV per cell, one row per (sim, estimand, estimator):
-#   results/per_config/setting_<id>/<learner>_<cf|nocf>.csv
-# Re-running replaces the rows for the requested sims and keeps the rest.
+# For every cell with a saved nuisance file: truncate pihat to pi_bounds, run
+# the estimators on the same (pihat, mu0hat, mu1hat) vectors and grade each
+# estimate against its own replicate's truth:
+#   bias         estimate - sample truth (mean effect over the n = 1000 rows)
+#   covered_pop  95% CI covers the population truth (all 4,802 rows); the
+#                influence-function SEs target the population parameter
+#   pehe_t       sqrt(mean((mu1hat - mu0hat - tau_true)^2)), on the ATE rows
+# Writes results/per_config/setting_<id>/<learner>_<cf|nocf>.csv, one row per
+# (sim, estimand, estimator); re-running replaces the requested sims only.
 # =============================================================================
 
 # --- Settings ----------------------------------------------------------------
-# Command line:
 #   Rscript 03_run_ate_estimators.R --settings 4,24 --sims 1:5
 #   Rscript 03_run_ate_estimators.R --settings manuscript
 #   Rscript 03_run_ate_estimators.R --settings 24 --learners parametric,oracle
-#   flags:  --settings <ids and/or preset names>  (REQUIRED)
-#           --learners a,b   --sims a:b|a,b,c   --cross_fit true,false
-# Interactive: edit the values below (and CONFIG_FILE further down), run top to bottom.
+# --settings is required; --learners, --sims and --cross_fit subset the run.
+# Interactive use: edit the values below and CONFIG_FILE, then run top to bottom.
 
-settings  <- NULL   # REQUIRED: setting ids and/or preset names, e.g. c(4, 24) or "manuscript"
+settings  <- NULL   # required: setting ids and/or preset names, e.g. c(4, 24) or "manuscript"
 learners  <- NULL   # NULL = roster in config.yaml; otherwise e.g. c("parametric", "oracle")
 sims      <- NULL   # NULL = 1..n_sims from config.yaml; otherwise e.g. 1:5 or c(3, 7)
 cross_fit <- NULL   # NULL = both; otherwise TRUE and/or FALSE
@@ -52,14 +43,13 @@ if (length(args) > 0) {
 }
 
 # --- Config and paths --------------------------------------------------------
-# Path to this repository's config.yaml. Fine as-is when you run the script with
-# Rscript from the repository; if you run it line by line, PUT THE FULL PATH HERE
-# (e.g. "~/ACIC-plasmode-pipeline/config.yaml").
+# Relative to the repository directory; use the full path when running
+# interactively.
 CONFIG_FILE <- "config.yaml"
 CONFIG      <- yaml::read_yaml(CONFIG_FILE)
 REPO_DIR    <- dirname(CONFIG_FILE)
 
-# Expand `--settings` tokens (setting ids and/or preset names from config.yaml).
+# Expand --settings (ids and/or preset names) into setting ids.
 resolve_settings <- function(tokens) {
   presets <- CONFIG$settings$presets
   if (is.null(tokens) || !length(tokens))
@@ -86,50 +76,30 @@ results_dir  <- file.path(REPO_DIR, CONFIG$paths$results, "per_config")
 suppressPackageStartupMessages(library(tmle))
 
 Z975 <- 1.959964   # normal 97.5% quantile for the Wald CIs
-# The six DGP knobs travel from the cached dataset into every result row, so
-# script 04 can summarise by DGP characteristics without re-reading config.yaml.
+# the DGP knobs are copied into every result row for script 04
 KNOB_COLS <- c("model.trt", "root.trt", "overlap.trt", "model.rsp", "alignment", "te.hetero")
 
 
 # =============================================================================
-# ==== The estimators -- all fed the SAME truncated nuisance vectors
+# ==== Estimators (all use the same truncated nuisance vectors)
 # =============================================================================
-# Every estimator consumes exactly (Y, A, pihat, mu0hat, mu1hat), pihat
-# truncated to PI_BOUNDS = [0.025, 0.975], so estimator differences are never
-# confounded with fit differences.
-#
-#   ATE
-#     tmle      tmle::tmle() with Q = (mu0hat, mu1hat) and g1W = pihat supplied,
-#               so tmle() does NO internal SuperLearning -- it only targets and
-#               reports the influence-curve SE / CI. gbound is left at the
-#               package default: its adaptive floor 5/(sqrt(n) log n) = 0.023 at
-#               n = 1000 lies below the study truncation, so it never binds.
-#               (Pass gbound = PI_BOUNDS explicitly if you ever run n < ~870.)
-#     aipw      one-step AIPW: psi_i = mu1 - mu0 + A(Y - mu1)/pi - (1-A)(Y - mu0)/(1-pi);
-#               est = mean(psi), se = sd(psi)/sqrt(n)   (EIF variance)
-#     ipw       Hajek (stabilized) IPW difference in weighted means
-#     gcomp     plug-in mean(mu1hat - mu0hat); NO standard error by design
-#   ATT (effect on the treated; graded vs the sample/population ATT truths)
-#     tmle_att  manual TMLE for the ATT built from the same nuisances: single
-#               clever-covariate fluctuation H = (1/p1)(A - (1-A) g/(1-g)) on the
-#               [0,1]-scaled outcome, epsilon by MLE, EIF-based SE. tmle()'s
-#               built-in ATT is deliberately NOT used: it re-derives (sometimes
-#               re-fits) the propensity, i.e. it is not faithful to the learner.
-#     aipw_att  one-step ATT (uses mu0hat + pihat only)
-#     ipw_att   Hajek IPW with odds weights on the controls
-#     gcomp_att plug-in mean over the treated; NO standard error
-#
-# SE caveat: the IPW SEs are known-propensity influence-curve SEs (pihat is
-# treated as fixed). For estimated propensities this is anti-conservative,
-# so IPW coverage should be read as neither conservative nor calibrated.
+#   tmle       tmle::tmle() with Q and g1W supplied, so it only targets and
+#              reports the influence-curve SE. gbound is left at its default
+#              (5/(sqrt(n) log n) = 0.023 at n = 1000, below the truncation).
+#   aipw       one-step AIPW; SE from the influence function
+#   ipw        Hajek IPW; known-propensity influence-curve SE (anti-conservative
+#              when the propensity is estimated)
+#   gcomp      plug-in mean(mu1hat - mu0hat); no SE
+#   *_att      the ATT versions. tmle_att is a manual TMLE with clever covariate
+#              H = (A - (1-A) g/(1-g)) / p1 on the [0,1]-scaled outcome, because
+#              tmle()'s built-in ATT re-derives the propensity.
 
 # --- TMLE (ATE) ---------------------------------------------------------------
 estimate_tmle_fn <- function(Y, A, X, pihat, mu0hat, mu1hat,
                              pi_bounds = PI_BOUNDS) {
   pihat <- pmax(pi_bounds[1], pmin(pi_bounds[2], pihat))
   Q <- cbind(mu0hat, mu1hat)
-  # evalATT = FALSE skips tmle()'s built-in ATT/ATC path (unused here; see
-  # estimate_tmle_att_fn). The ATE output is unchanged (verified identical).
+  # evalATT = FALSE skips tmle()'s built-in ATT path (see estimate_tmle_att_fn)
   result <- tryCatch(tmle(Y = Y, A = A, W = as.data.frame(X), Q = Q, g1W = pihat,
                           evalATT = FALSE),
                      error = function(e) NULL)
@@ -229,9 +199,7 @@ estimate_gcomp_att_fn <- function(A, mu0hat, mu1hat)
   list(estimate = mean((mu1hat - mu0hat)[A == 1]),
        se = NA_real_, ci_lower = NA_real_, ci_upper = NA_real_)
 
-# --- CATE: T-learner PEHE ----------------------------------------------------------
-# The CATE truth is tau_true = mu.1 - mu.0 per unit (noiseless conditional-mean
-# effect). The T-learner differences the learner's own outcome fits.
+# --- CATE: T-learner PEHE against tau_true = mu.1 - mu.0 ---------------------------
 pehe_t_fn <- function(mu0hat, mu1hat, tau_true)
   sqrt(mean((mu1hat - mu0hat - tau_true)^2))
 
@@ -249,9 +217,8 @@ read_sim <- function(setting_id, sim_id) {
   s
 }
 
-# Script 02 saves one .rds per cell. A .csv with columns pihat, mu0hat, mu1hat
-# (e.g. a Python track writing raw, untruncated vectors) is accepted in the
-# same location. Either way pihat is truncated to PI_BOUNDS here.
+# Reads the .rds from script 02, or a .csv with columns pihat, mu0hat, mu1hat
+# (e.g. a Python track) in the same location; pihat is truncated here.
 read_nuisance <- function(setting_id, learner_name, sim_id, cf_label) {
   stem <- file.path(nuisance_dir, sprintf("setting_%d", setting_id), "nuisance", learner_name,
                     sprintf("sim_%04d_%s", sim_id, cf_label))

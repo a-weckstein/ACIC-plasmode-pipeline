@@ -1,43 +1,26 @@
 # =============================================================================
 # 04_evaluate_metrics.R — Monte Carlo evaluation metrics (Simulation 2)
 #
-# Reads every per-cell CSV written by 03_run_ate_estimators.R and computes the
-# manuscript's evaluation metrics per (DGP setting x learner x cross-fit x
-# estimand x estimator), then macro-averages across the contributing DGPs.
-# Works for whatever settings were actually run: each result row carries its own
-# DGP knobs, so nothing here depends on a fixed grid.
-#
-# Per-setting metrics (50 replicates; every per-sim quantity is graded against
-# that replicate's OWN truth, because the DGP redraws its surfaces every sim):
-#   signed_bias   mean(estimate - sample truth)
-#   abs_bias      |signed_bias|
-#   rel_bias_pct  100 * abs_bias / |mean sample truth|     (bias as % of the true effect)
-#   RMSE          sqrt(mean((estimate - sample truth)^2))
-#   RMSE_pct_oracle  100 * RMSE / RMSE of the oracle arm (same setting, estimand,
-#                 estimator; the oracle has no cross-fit arm, so both tracks are
-#                 compared with the same oracle row)
-#   coverage_pop  proportion of 95% CIs covering the POPULATION truth (N=4,802)
-#   SE_ratio_pop  mean model SE / SD(estimate - population truth)
-#                 (~1 calibrated, >1 conservative, <1 anti-conservative)
-#   MCSE_*        Monte Carlo standard errors (bias: sd/sqrt(n); coverage: binomial)
-#   mean_pehe_t   mean T-learner PEHE (cross-fit; a learner property)
-# Macro averages: ATE and PEHE over the full-overlap settings (identifiable
-# estimands), ATT over all settings; PEHE for cross-fit nuisances only
+# Reads the per-cell CSVs from script 03 and summarises them per (setting,
+# learner, cross-fit, estimand, estimator), then macro-averages across settings.
+# Per-setting metrics, each replicate graded against its own truth:
+#   signed_bias, abs_bias, rel_bias_pct   vs the sample truth
+#   RMSE, RMSE_pct_oracle                 RMSE, and relative to the oracle arm
+#   coverage_pop, SE_ratio_pop            95% CI coverage of the population truth;
+#                                         mean SE / SD(estimate - population truth)
+#   MCSE_*                                Monte Carlo standard errors
+#   mean_pehe_t                           T-learner PEHE (cross-fit)
+# Macro averages: ATE and PEHE over full-overlap settings, ATT over all
 # (config.yaml `evaluation`).
-#
-# Writes:
-#   results/sim_level_results.csv     all per-sim rows, with the DGP knobs joined
-#   results/summary_by_dgp.csv        per-setting ATE/ATT metrics
-#   results/summary_pehe_by_dgp.csv   per-setting PEHE
-#   results/summary_macro.csv         macro-averages across settings
+# Writes results/sim_level_results.csv, summary_by_dgp.csv,
+# summary_pehe_by_dgp.csv and summary_macro.csv.
 # =============================================================================
 
 # --- Settings ----------------------------------------------------------------
-# Command line:
 #   Rscript 04_evaluate_metrics.R
 #   Rscript 04_evaluate_metrics.R --settings 4,24 --learners parametric,oracle
 #   Rscript 04_evaluate_metrics.R --settings manuscript_full_overlap
-# Interactive: edit the values below (and CONFIG_FILE further down), run top to bottom.
+# Interactive use: edit the values below and CONFIG_FILE, then run top to bottom.
 
 settings <- NULL    # NULL = every setting found in results/; otherwise ids and/or preset names, e.g. c(4, 24)
 learners <- NULL    # NULL = every learner found in results/; otherwise a subset
@@ -53,16 +36,15 @@ if (length(args) > 0) {
 }
 
 # --- Config and paths --------------------------------------------------------
-# Path to this repository's config.yaml. Fine as-is when you run the script with
-# Rscript from the repository; if you run it line by line, PUT THE FULL PATH HERE
-# (e.g. "~/ACIC-plasmode-pipeline/config.yaml").
+# Relative to the repository directory; use the full path when running
+# interactively.
 CONFIG_FILE <- "config.yaml"
 CONFIG      <- yaml::read_yaml(CONFIG_FILE)
 REPO_DIR    <- dirname(CONFIG_FILE)
 results_dir <- file.path(REPO_DIR, CONFIG$paths$results)
 per_config  <- file.path(results_dir, "per_config")
 
-# Expand `--settings` tokens (ids and/or preset names from config.yaml), as in scripts 01-03.
+# Expand --settings (ids and/or preset names) into setting ids.
 if (!is.null(settings)) {
   presets  <- CONFIG$settings$presets
   settings <- unique(unlist(lapply(as.character(settings), function(tk) {
@@ -86,8 +68,7 @@ if (!is.null(settings)) sim_df <- filter(sim_df, setting_id %in% settings)
 if (!is.null(learners)) sim_df <- filter(sim_df, learner %in% learners)
 if (!nrow(sim_df)) stop("No rows left after filtering")
 
-# The DGP knobs travel with the results (written by script 03), so no settings
-# table is needed here: this script summarises whatever was actually run.
+# the DGP knobs come with the result rows (script 03)
 sim_df <- sim_df %>%
   mutate(cross_fit = as.logical(cross_fit)) %>%
   arrange(setting_id, learner, cross_fit, sim_id, estimand, estimator)
@@ -131,8 +112,7 @@ by_dgp <- sim_df %>%
 oracle_rmse <- by_dgp %>%
   filter(learner == "oracle") %>%
   select(setting_id, estimand, estimator, RMSE_oracle = RMSE)
-# (NA for G-computation: the oracle's plug-in mean IS the sample truth, so its
-# RMSE is 0 by construction.)
+# (NA for G-computation, whose oracle RMSE is 0)
 by_dgp <- by_dgp %>%
   left_join(oracle_rmse, by = c("setting_id", "estimand", "estimator")) %>%
   mutate(RMSE_pct_oracle = ifelse(!is.na(RMSE_oracle) & RMSE_oracle > 1e-12,
@@ -154,13 +134,10 @@ write.csv(pehe_by_dgp, file.path(results_dir, "summary_pehe_by_dgp.csv"), row.na
 # =============================================================================
 # ==== Macro-averages across settings
 # =============================================================================
-# ATE: full-overlap settings only; ATT: all settings; PEHE: full-overlap,
-# cross-fit only (config.yaml `evaluation`). Each metric is averaged over the
-# settings a learner contributed; n_dgps reports that denominator.
+# ATE: full-overlap settings; ATT: all; PEHE: full-overlap, cross-fit (config.yaml
+# `evaluation`). n_dgps is the number of settings each average is over.
 
 ev <- CONFIG$evaluation
-# The setting sets come from the knobs in the results themselves, so this works
-# for any DGP that was run, not only the manuscript's.
 all_ids  <- unique(by_dgp$setting_id)
 full_ids <- unique(by_dgp$setting_id[by_dgp$overlap_trt == "full"])
 keep_settings <- function(rule) if (identical(rule, "all")) all_ids else full_ids
