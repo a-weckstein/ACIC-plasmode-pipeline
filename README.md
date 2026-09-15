@@ -5,15 +5,15 @@
 
 # Simulation (2) — ACIC 2016 semi-synthetic plasmode simulation
 * Data-generating processes (DGPs) from the ACIC 2016 competition machinery (`aciccomp2016`; Dorie et al. 2019): the real 4,802 × 58 covariate matrix with synthetic treatment and outcome surfaces, redrawn on every replicate. Each replicate is analysed on an n = 1,000 subsample.
-* You choose which DGPs to run (`--settings`): built-in ACIC settings by id and/or custom knob combinations. The manuscript's 44 DGPs (Table S2) ship as the preset `manuscript`.
+* Choose which DGPs to run via `--settings`. Built-in ACIC settings by id and/or custom knob combinations. The manuscript's 44 DGPs (Table S2) ship as the preset `manuscript`.
 * Four R scripts parameterized by `config.yaml`; each runs from the command line or interactively.
 
 | File |  |
 |---|---|
 | `01_generate_dgp_data.R` | Draws and caches one dataset per (setting × replicate) with its ground truth and cross-fitting folds; optional CSV export for a Python/TabPFN track. |
 | `02_run_nuisance_learners.R` | Fits every nuisance learner (in-sample and 5-fold cross-fit) and saves the propensity score and the two arm-specific outcome regressions to `_data_processed/setting_<id>/nuisance/<learner>/`. |
-| `03_run_ate_estimators.R` | TMLE, AIPW, Hájek IPW and G-computation for the ATE and the ATT on the saved nuisance vectors, plus the T-learner CATE error (PEHE); one CSV per cell in `results/per_config/`. |
-| `04_evaluate_metrics.R` | Bias, RMSE, coverage, SE calibration and PEHE per DGP setting, and macro-averaged across settings. |
+| `03_run_ate_estimators.R` | TMLE, AIPW, IPW and G-computation for the ATE and the ATT on the saved nuisance vectors, plus the T-learner CATE error (PEHE); one CSV per cell in `results/per_config/`. |
+| `04_evaluate_metrics.R` | Bias, RMSE, coverage, SE calibration and PEHE per DGP setting and macro-averaged across DGP settings. |
 
 ## How to run
 Run the scripts from the repository directory.
@@ -22,7 +22,7 @@ Run the scripts from the repository directory.
 Rscript 01_generate_dgp_data.R --settings manuscript                  # the 44 manuscript DGPs, 50 sims each
 Rscript 01_generate_dgp_data.R --settings 4,24 --sims 1:5
 
-# 2. Nuisance learners (all learners, both tracks, unless subset)
+# 2. Nuisance learners (all learners, both tracks, unless subsetted)
 Rscript 02_run_nuisance_learners.R --settings 4,24 --sims 1:5
 Rscript 02_run_nuisance_learners.R --settings 24 --learners parametric,ranger_naimi --cross_fit true
 
@@ -32,19 +32,11 @@ Rscript 03_run_ate_estimators.R --settings 4,24 --sims 1:5
 # 4. Evaluation metrics (everything in results/, or a --settings / --learners subset)
 Rscript 04_evaluate_metrics.R
 ```
-All scripts accept `--sims a:b` / `--sims a,b,c`; 02 and 03 also take `--learners` and `--cross_fit true,false`. To run a script interactively, set `CONFIG_FILE` near its top to the full path of `config.yaml` and edit the option block above it. Scripts 02 and 03 are resume-safe, and every (setting, sim) is seed-isolated, so settings can be sharded across processes. Data and results are git-ignored.
-
-## Choosing DGP settings
-* **Built-in** settings, ids 1–77: the knobs of `aciccomp2016::parameters_2016[id, ]` with the package's curated seed table (at most 100 replicates).
-* **Custom** settings, ids ≥ 100: six knobs you specify (`model.trt`, `root.trt`, `overlap.trt`, `model.rsp`, `alignment`, `te.hetero`; accepted values are listed in `config.yaml`), either under `settings.custom` in `config.yaml` or, for a one-off, on script 01 with `--knobs "model.trt=step,root.trt=0.5,..." --label "..."`.
-* **Presets** (`config.yaml`): `manuscript` (all 44, in Table S2 order), `manuscript_full_overlap` (35), `manuscript_one_term` (9), `demo` (4, 24). Ids and preset names can be mixed: `--settings manuscript_full_overlap,54`.
-* A custom setting's `seed_scheme` is `namespaced` (independent subsample) or `legacy`, which pairs custom id 1xx with built-in id − 100 on the same covariate rows (how the manuscript's full-overlap twins are matched to their one-term counterparts). Cached datasets record their knobs and are re-checked on every run, so an id can never silently change meaning.
 
 ## Design
-* Per replicate: surfaces + treatment + outcome on all 4,802 units, then an n = 1,000 subsample without replacement. Learners see an 80-column numeric design (58 covariates, categoricals expanded).
+* Per replicate: surfaces + treatment + outcome on all 4,802 units, then an n = 1,000 subsample without replacement. Learners see an 80-column covariate matrix (58 covariates, with one-hot dummy encoding for categorical levels).
 * Ground truth per replicate: CATE τ(X) = μ₁(X) − μ₀(X); sample ATE/ATT over the 1,000 rows, population ATE/ATT over all 4,802.
-* Cross-fitting: 5 folds, shared across learners within a replicate (DML2). Propensity scores are truncated to [0.025, 0.975] for every learner before any estimator.
-* Every random draw is deterministic in (setting, sim), so learner contrasts are paired within replicate; the seed protocol is documented in the header of `01_generate_dgp_data.R`.
+* Cross-fitting: 5 folds, shared across learners within a replicate (DML2). Propensity scores are truncated to [0.025, 0.975] for every learner before inputting in AIPW/TMLE/IPW estimators.
 
 ## Learners (manuscript name ← key for `--learners`)
 | Manuscript | Key | Configuration |
@@ -59,12 +51,8 @@ All scripts accept `--sims a:b` / `--sims a,b,c`; 02 and 03 also take `--learner
 | Oracle | `oracle` | the replicate's true propensity (truncated) and true outcome surfaces; no cross-fit arm |
 | TabPFN | — | TabPFN v3 via the cloud API (`tabpfn-client` 0.3.0; n_estimators 8, random_state 0): a classifier for the propensity and two arm-stratified regressors on the raw 58 covariates, same folds as the R learners. Not included here (needs an API account, and the hosted model drifts over time). Script 03 accepts a CSV of `pihat, mu0hat, mu1hat` in the nuisance directory; `01 --export_csv TRUE` writes the matching inputs. |
 
-## Estimators and metrics
-* Estimators (script 03): TMLE (`tmle::tmle()` with Q and g supplied; a manual TMLE for the ATT), one-step AIPW, Hájek IPW and G-computation, each for the ATE and the ATT. Influence-function SEs for TMLE/AIPW, known-propensity IC for IPW, none for G-computation.
-* Bias and RMSE are graded against the replicate's sample truth; 95% CI coverage and the SE ratio against the population truth (the target of the influence-function variances); CATE by the T-learner PEHE on cross-fit nuisances. The ATE and CATE are evaluated on full-overlap settings, the ATT on all.
-
-## Packages and reproducibility
-`aciccomp2016` (`remotes::install_github("vdorie/aciccomp/2016")`), `tmle`, `SuperLearner`, `ranger`, `dbarts`, `earth`, `gam`, `glmnet`, `xgboost`, `hal9001`, `yaml`, `dplyr` — all required by script 02 whatever the learner subset. Reported results: R 4.5.2, tmle 2.1.1, SuperLearner 2.0.40, ranger 0.18.0, dbarts 0.9.32, earth 5.3.5, gam 1.22.7, glmnet 4.1.10, xgboost 3.1.3.1, hal9001 0.4.6. With these versions the pipeline was validated to reproduce the archived manuscript results to floating-point precision on a subset of settings and replicates for every learner and both tracks (HAL's basis enumeration depends on the hal9001 version). TabPFN results reproduce only from the saved nuisance fits.
+## Packages
+`aciccomp2016` (`remotes::install_github("vdorie/aciccomp/2016")`), `tmle`, `SuperLearner`, `ranger`, `dbarts`, `earth`, `gam`, `glmnet`, `xgboost`, `hal9001`, `yaml`, `dplyr` — all required by script 02 whatever the learner subset. Reported results: R 4.5.2, tmle 2.1.1, SuperLearner 2.0.40, ranger 0.18.0, dbarts 0.9.32, earth 5.3.5, gam 1.22.7, glmnet 4.1.10, xgboost 3.1.3.1, hal9001 0.4.6. 
 
 # References
 - Dorie V, Hill J, Shalit U, Scott M, Cervone D (2019). Automated versus do-it-yourself methods for causal inference: Lessons learned from a data analysis competition. *Stat Sci* 34(1):43–68. (ACIC 2016.)
