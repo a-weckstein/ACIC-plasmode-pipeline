@@ -188,7 +188,7 @@ estimate_ipw_att_fn <- function(Y, A, pihat) {
   wk <- (1 - A) * k
   mu0_att <- sum(wk * Y) / sum(wk)
   psi <- mu1_att - mu0_att
-  phi <- (1 / p1) * (A * (Y - mu1_att) - wk * (Y - mu0_att))
+  phi <- A * (Y - mu1_att) / p1 - wk * (Y - mu0_att) / mean(wk)
   se  <- sd(phi) / sqrt(n)
   list(estimate = psi, se = se,
        ci_lower = psi - Z975 * se, ci_upper = psi + Z975 * se)
