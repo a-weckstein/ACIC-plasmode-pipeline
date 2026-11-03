@@ -1,7 +1,7 @@
 **Pretrained tabular foundation models with prior‑data fitted networks for causal nuisance estimation**
 * Pipeline for generating semi-synthetic (plasmode) datasets, implementing nuisance learners, building causal estimators, and computing evaluation metrics.
 * See manuscript and supplement for further detail.
-* This repo covers the plasmode simulation (2); the fully synthetic simulation (1) has its own repository: [Tabular-FM-causal-simulations](https://github.com/a-weckstein/Tabular-FM-causal-simulations).
+* This repo covers the plasmode simulation (2); the fully synthetic simulation (1) has its own repository (**Tabular-FM-causal-simulations**).
 
 # Simulation (2) — ACIC 2016 semi-synthetic plasmode simulation
 * Data-generating processes (DGPs) from the ACIC 2016 competition machinery (`aciccomp2016`; Dorie et al. 2019): the real 4,802 × 58 covariate matrix with synthetic treatment and outcome surfaces, redrawn on every replicate. Each replicate is analysed on an n = 1,000 subsample.
